@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.6.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.6.3-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,26 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.6.3 — 已知 Bug 修复 + 接管页监控增强
+
+**修复僵尸进程泄漏（严重）**：`verify_browser` 启动探测时未设置
+`PLAYWRIGHT_BROWSERS_PATH`，走了 playwright 默认缓存路径，导致重复下载一份内核（白占 646 MB）
+且探测进程无人回收、累积成僵尸。现所有调用点统一传插件内核目录，从源头消除。
+
+**修复 webkit / firefox 装上却启动不了**：缺少 `libgstreamer` / `libgtk-4` 等 28 个系统库。
+新增 `install_system_deps()`（调 `playwright install-deps`），
+并在检测到缺库时自动补装重试；WebUI 新增「安装系统依赖」一键按钮。
+
+**接管页增强**：
+- 服务器内存进度条（其他占用 / 浏览器占用 / 关闭阈值线）
+- 实时指标：画面延迟 / 服务器刷新率 / 下行带宽 / 累计帧数（全部用户端计算）
+- 标签页管理：列表 / 切换 / 关闭 / 新建 / 一键关闭全部
+- 浏览器被自动关闭时在页面顶部提示原因
+
+**行为修正**：标签页管理方向（接管中也可用）、
+「卡住」判据改用状态心跳（静止画面不再误报）、
+内存阈值热更新、「就绪」状态按真实进程判定。
 
 ### v5.6.2 — 提示词去重融合 + 操作图标换新 + 仓库文件补齐
 

@@ -943,8 +943,14 @@
     "type": "float",
     "default": 1.0
   },
+  "browser_memory_limit_mb": {
+    "description": "浏览器自身内存上限（MB），超过则自动关闭浏览器（0 表示不限制）",
+    "type": "int",
+    "default": 0,
+    "hint": "只统计浏览器进程组自身的占用，不受服务器上其他服务影响。设为 0 表示不限制（仅靠下面的百分比阈值兜底）。建议小内存服务器设为 1200 左右"
+  },
   "max_memory_percent": {
-    "description": "浏览器内存使用上限（百分比）",
+    "description": "服务器内存占用上限（百分比），超过则自动关闭浏览器",
     "type": "int",
     "default": 90
   },

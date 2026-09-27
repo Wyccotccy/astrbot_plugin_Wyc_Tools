@@ -97,7 +97,7 @@ CONFIG_SAVE_WHITELIST = {
     "browser_type", "browser_mode", "cdp_url", "verify_browser",
     "default_url", "proxy", "viewport_size", "max_pages",
     "timeout", "zoom_factor", "max_memory_percent",
-    "idle_timeout", "monitor_interval",
+    "idle_timeout", "monitor_interval", "browser_memory_limit_mb",
     "browser_vision_gate_enabled", "browser_stealth_enabled",
     # 浏览器操作展示（v5.3.0）
     "browser_always_show_action", "browser_action_overlay_enabled",
@@ -4176,6 +4176,10 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_action", self.handle_takeover_action, ["POST"], "接管操作注入")
             self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_end", self.handle_takeover_end, ["POST"], "结束接管")
             self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_probe", self.handle_takeover_probe, ["POST"], "接管画面带宽探测")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tabs", self.handle_tabs, ["GET"], "标签页列表")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tab_action", self.handle_tab_action, ["POST"], "标签页操作")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/browser_memory", self.handle_browser_memory, ["GET"], "浏览器与服务器内存状态")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/install_deps", self.handle_install_deps, ["POST"], "安装浏览器系统依赖")
             self.context.register_web_api(f"/{PLUGIN_NAME}/scheduled_messages", self.handle_get_scheduled_messages, ["GET"], "获取定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/add_scheduled_message", self.handle_add_scheduled_message, ["POST"], "添加定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/cancel_scheduled_message", self.handle_cancel_scheduled_message, ["POST"], "取消定时消息")
@@ -4260,10 +4264,40 @@ class Main(Star):
             # 操作图标叠加组件懒初始化（插件加载时可能尚未就绪）
             if self.browser_action_overlay_enabled and not self.action_overlay:
                 self._init_action_overlay()
+            # ★ 浏览器性能阈值热更新（关键修复）：
+            #   supervisor 是在插件初始化时构造的，其内存阈值/空闲超时/监控间隔
+            #   都是构造时读一次就固定。若这里不重新赋值，WebUI 改了配置也不生效，
+            #   表现为「进度条上的阈值一直显示旧值」。
+            self._sync_supervisor_config()
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
             return jsonify({"success": False, "error": "保存失败，请查看日志"})
+
+    def _sync_supervisor_config(self) -> None:
+        """把最新的浏览器性能配置同步给已存在的 supervisor（配置热更新）。
+
+        supervisor 的阈值都在构造时读取，插件运行中改配置必须显式回写，
+        否则 WebUI 改了「服务器内存占用上限 / 浏览器内存上限 / 空闲超时 /
+        监控间隔」都不会生效。
+        """
+        if not self.browser_supervisor:
+            return
+        try:
+            sup = self.browser_supervisor
+            sup.max_memory_percent = int(self.config.get("max_memory_percent", 90) or 90)
+            sup.idle_timeout = int(self.config.get("idle_timeout", 300) or 300)
+            sup.monitor_interval = float(self.config.get("monitor_interval", 10) or 10)
+            sup.browser_memory_limit_mb = int(
+                self.config.get("browser_memory_limit_mb", 0) or 0
+            )
+            logger.info(
+                f"[Browser] 性能阈值已热更新: 服务器上限={sup.max_memory_percent}% "
+                f"浏览器上限={sup.browser_memory_limit_mb}MB "
+                f"空闲超时={sup.idle_timeout}s 监控间隔={sup.monitor_interval}s"
+            )
+        except Exception as e:
+            logger.warning(f"[Browser] 性能阈值热更新失败: {_safe_error_msg(e)}")
 
     async def handle_get_memories(self):
         try:
@@ -4432,20 +4466,30 @@ class Main(Star):
     async def handle_takeover_status(self):
         """查询接管状态与浏览器可用性。"""
         try:
-            browser_ready = bool(self.browser_supervisor)
-            if browser_ready:
-                # 进一步确认浏览器实际已启动（懒加载，未用过时为 None）
+            # 浏览器是否真的在跑：以 supervisor 内部句柄为准（那是权威状态）。
+            # 注意不要用 takeover 会话是否存在来判断，两者独立。
+            browser_running = False
+            memory = None
+            if self.browser_supervisor:
                 try:
-                    browser_ready = bool(getattr(self.browser_supervisor, "browser", None))
+                    browser_running = bool(getattr(self.browser_supervisor, "browser", None))
                 except Exception:
-                    browser_ready = self.browser_supervisor is not None
+                    browser_running = False
+                try:
+                    memory = self.browser_supervisor.memory_snapshot()
+                except Exception as e:
+                    logger.debug(f"[Takeover] 内存快照失败: {e}")
+                # 交叉校验：句柄在但进程没了（外部被杀），同样算「未运行」
+                if browser_running and memory is not None:
+                    if not memory.get("browser_procs"):
+                        browser_running = False
 
             mgr = self.takeover_manager
             sess = mgr.session
             payload = {
                 "success": True,
                 "browser_enabled": bool(self.browser_supervisor) and self.config.get("enabled", True),
-                "browser_running": browser_ready,
+                "browser_running": browser_running,
                 "active": mgr.is_active(),
                 "session": sess.status_payload() if sess else None,
                 "max_seconds": mgr.max_seconds,
@@ -4455,9 +4499,126 @@ class Main(Star):
                 payload["reason"] = sess.reason
                 payload["viewport"] = list(sess.viewport)
                 payload["frame_size"] = list(sess.frame_size)
+
+            # 内存快照（供 WebUI 进度条）+ 最近一次自动关闭记录（供提示用户）
+            if memory is not None:
+                memory["browser_running"] = browser_running
+                payload["memory"] = memory
             return jsonify(payload)
         except Exception as e:
             logger.error(f"[Takeover] 查询状态失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    # ==================== 标签页管理（v5.6.3） ====================
+
+    async def handle_tabs(self):
+        """标签页列表。"""
+        if not self.browser_supervisor:
+            return jsonify({"success": False, "error": "浏览器未启用"})
+        try:
+            tabs = await self.browser_supervisor.call("tabs_detail")
+            mem = None
+            try:
+                mem = self.browser_supervisor.memory_snapshot()
+            except Exception:
+                pass
+            return jsonify({
+                "success": True,
+                "tabs": tabs or [],
+                "memory": mem,
+                "running": bool(getattr(self.browser_supervisor, "browser", None)),
+            })
+        except Exception as e:
+            logger.error(f"[Tabs] 获取标签页失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_tab_action(self):
+        """标签页操作：switch / close / new / close_all。
+
+        权限方向（v5.6.3 修正）：
+          - **接管进行中** → 是「真人用户在操作」，此时 WebUI 的标签页管理
+            正是给用户用的，必须放行。
+          - **未接管** → 由 AI 独占控制，用户在 WebUI 上改标签页会打断 AI，
+            这里也放行但仅作提示（用户对浏览器有最终处置权）。
+        换句话说：AI 侧的工具调用会被接管拦下（那条在工具入口判断），
+        WebUI 侧的标签页管理**任何时候都可用**。
+        """
+        if not self.browser_supervisor:
+            return jsonify({"success": False, "error": "浏览器未启用"})
+
+        try:
+            data = await request.get_json() or {}
+            action = str(data.get("action", "")).strip()
+            if action == "switch":
+                idx = int(data.get("index", -1))
+                msg = await self.browser_supervisor.call("switch_tab", index=idx)
+                ok = not msg or "无效" not in str(msg)
+                return jsonify({"success": ok, "message": msg or f"已切换到标签页 {idx + 1}",
+                                "error": None if ok else str(msg)})
+            if action == "close":
+                idx = int(data.get("index", -1))
+                msg = await self.browser_supervisor.call("close_tab", index=idx)
+                ok = "无效" not in str(msg)
+                return jsonify({"success": ok, "message": msg,
+                                "error": None if ok else str(msg)})
+            if action == "new":
+                url = str(data.get("url", "")).strip()
+                msg = await self.browser_supervisor.call("new_tab", url=url)
+                ok = "失败" not in str(msg)
+                return jsonify({"success": ok, "message": msg,
+                                "error": None if ok else str(msg)})
+            if action == "close_all":
+                msg = await self.browser_supervisor.call("close_all_tabs", keep_one=True)
+                return jsonify({"success": True, "message": msg})
+            return jsonify({"success": False, "error": f"未知操作: {action}"})
+        except Exception as e:
+            logger.error(f"[Tabs] 标签页操作失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_browser_memory(self):
+        """浏览器与服务器内存状态（供进度条）。"""
+        if not self.browser_supervisor:
+            return jsonify({"success": False, "error": "浏览器未启用"})
+        try:
+            snap = self.browser_supervisor.memory_snapshot()
+            snap["success"] = True
+            return jsonify(snap)
+        except Exception as e:
+            logger.error(f"[Memory] 内存快照失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_install_deps(self):
+        """安装浏览器所需的系统依赖库。
+
+        webkit / firefox 依赖 gtk / gstreamer 等系统库，缺失时报
+        「Host system is missing dependencies to run browsers」。
+        这里提供 WebUI 一键安装入口，省去用户进容器敲命令。
+        """
+        try:
+            data = await request.get_json() or {}
+            browser = str(data.get("browser", "") or
+                          self.config.get("browser_type", "chromium"))
+            if browser not in ("chromium", "firefox", "webkit"):
+                return jsonify({"success": False, "error": f"不支持的浏览器: {browser}"})
+
+            from .core.downloader import BrowserDownloader
+
+            ok, msg = await BrowserDownloader.install_system_deps(browser)
+            if not ok:
+                return jsonify({"success": False, "error": msg})
+
+            # 装完立刻验证一次，把结果一并返回
+            verified = await BrowserDownloader.verify_browser(
+                browser, retries=1, auto_install_deps=False,
+                browsers_dir=Path(self.data_dir) / "browsers",
+            )
+            return jsonify({
+                "success": True,
+                "message": msg + ("，浏览器已可用 ✓" if verified else "，但启动验证仍失败"),
+                "verified": verified,
+            })
+        except Exception as e:
+            logger.error(f"[Browser] 安装系统依赖失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_takeover_stream(self):
@@ -4783,9 +4944,22 @@ class Main(Star):
                     "max_memory_percent": self.config.get("max_memory_percent", 90),
                     "idle_timeout": self.config.get("idle_timeout", 300),
                     "monitor_interval": self.config.get("monitor_interval", 10),
+                    "browser_memory_limit_mb": self.config.get("browser_memory_limit_mb", 0),
                 }
             }
             self.browser_supervisor = BrowserSupervisor(browser_config, str(self.data_dir))
+            # 接管中禁止自动关闭浏览器（用户正在操作，杀掉等于毁掉整场操作）
+            try:
+                self.browser_supervisor._in_takeover = self.takeover_manager.is_active
+            except Exception:
+                pass
+            # 让接管会话的状态推送带上内存快照（WebUI 进度条实时刷新）
+            try:
+                self.takeover_manager.memory_provider = (
+                    self.browser_supervisor.memory_snapshot
+                )
+            except Exception:
+                pass
             self._create_bg_task(self.browser_supervisor.start(), "browser_supervisor")
             logger.info("[Browser] 高级浏览器管理已初始化")
         except Exception as e:
@@ -4823,7 +4997,10 @@ class Main(Star):
             # 检查浏览器是否可用（统一走 BrowserDownloader，避免多处并发 launch）
             from .core.downloader import BrowserDownloader
             browser_type = self.config.get("browser_type", "chromium")
-            if await BrowserDownloader.verify_browser(browser_type):
+            # 传对浏览器目录：插件把内核装在 data_dir/browsers，
+            # 不传会走 playwright 默认缓存路径，导致重复下载 / 起无关进程
+            if await BrowserDownloader.verify_browser(
+                    browser_type, browsers_dir=Path(self.data_dir) / "browsers"):
                 logger.info(f"[Playwright] {browser_type} 浏览器已安装且可用")
                 return
 

@@ -104,6 +104,10 @@ class TakeoverSession:
     # 状态变更回调（用于给前端推状态）
     state_listeners: list[Callable[[dict], Awaitable[None]]] = field(default_factory=list)
 
+    # 内存快照提供者：由外部注入（supervisor.memory_snapshot），
+    # 让 SSE 每秒推送的状态里带上内存数据，WebUI 进度条即可实时刷新。
+    memory_provider: Callable[[], dict] | None = None
+
     # 结束回调：非阻塞模式下，由它负责把 AI 唤醒并交回截图
     on_finished: Callable[["TakeoverSession"], Awaitable[None]] | None = None
     # 结束回调是否已执行（防止重复唤醒）
@@ -133,7 +137,7 @@ class TakeoverSession:
 
     def status_payload(self) -> dict:
         """给前端/AI 的状态快照。"""
-        return {
+        payload = {
             "active": not self.finished.is_set(),
             "session_id": self.session_id,
             "reason": self.reason,
@@ -145,7 +149,16 @@ class TakeoverSession:
             "action_count": self.action_count,
             "ended": self.finished.is_set(),
             "end_reason": self.end_reason,
+            # 服务端心跳时间戳：前端据此判断「服务器是否卡住」
+            # （画面是变化驱动的，静止页面本来就不推帧，不能拿帧当心跳）
+            "ts": time.time(),
         }
+        if self.memory_provider is not None:
+            try:
+                payload["memory"] = self.memory_provider()
+            except Exception as e:
+                logger.debug(f"[Takeover] 内存快照注入失败: {e}")
+        return payload
 
     async def notify_state(self) -> None:
         """向所有状态监听者广播一次状态。"""
@@ -536,14 +549,15 @@ class TakeoverManager:
             last_state = time.time()
             while not sess.finished.is_set() and not viewer.closed:
                 try:
-                    frame = await asyncio.wait_for(viewer.queue.get(), timeout=1.0)
+                    frame = await asyncio.wait_for(viewer.queue.get(), timeout=0.5)
                     yield self.frame_to_sse(frame)
                 except asyncio.TimeoutError:
                     pass
                 except asyncio.CancelledError:
                     break
-                # 每秒补一次状态
-                if time.time() - last_state >= 1.0:
+                # 每 0.5 秒补一次状态：既当心跳（前端据此判断服务器是否卡住），
+                # 也让内存进度条能实时刷新
+                if time.time() - last_state >= 0.5:
                     yield self.state_to_sse(sess.status_payload())
                     last_state = time.time()
 

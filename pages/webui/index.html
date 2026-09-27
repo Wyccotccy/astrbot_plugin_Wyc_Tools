@@ -358,6 +358,129 @@
         .tk-timer.warn { color: var(--warn); }
         .tk-timer.danger { color: var(--danger); }
 
+        /* ---- 接管实时指标（全部在用户端计算） ---- */
+        .tk-metrics {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 8px; margin: 10px 0 4px;
+        }
+        .tk-metric {
+            background: var(--bg-2, #f8fafc);
+            border: 1px solid var(--border, #e5e7eb);
+            border-radius: var(--radius-sm);
+            padding: 8px 10px;
+        }
+        .tk-metric .k {
+            font-size: 11px; color: var(--text-3);
+            margin-bottom: 3px; white-space: nowrap;
+        }
+        .tk-metric .v {
+            font-family: var(--font-mono, ui-monospace, monospace);
+            font-size: 15px; font-weight: 700; color: var(--text-1, #0f172a);
+        }
+        .tk-metric .v.ok { color: var(--success); }
+        .tk-metric .v.warn { color: var(--warn); }
+        .tk-metric .v.danger { color: var(--danger); }
+        .tk-metric .s { font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+        @media (max-width: 640px) {
+            .tk-metrics { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* ---- 内存进度条 ---- */
+        .mem-bar-wrap { margin-top: 6px; }
+        .mem-bar {
+            position: relative; height: 26px; border-radius: 8px;
+            background: var(--bg-2, #f1f5f9); overflow: hidden;
+            border: 1px solid var(--border, #e5e7eb);
+        }
+        .mem-bar-seg {
+            position: absolute; top: 0; bottom: 0; left: 0;
+            transition: width .35s ease;
+        }
+        .mem-bar-seg.other { background: linear-gradient(180deg,#94a3b8,#64748b); }
+        .mem-bar-seg.browser { background: linear-gradient(180deg,#38bdf8,#0284c7); }
+        .mem-bar-seg.free { background: transparent; }
+        /* 阈值标记线 */
+        .mem-bar-mark {
+            position: absolute; top: -3px; bottom: -3px; width: 2px;
+            background: var(--danger, #ef4444); z-index: 3;
+        }
+        .mem-bar-mark::after {
+            content: attr(data-label);
+            position: absolute; top: -17px; left: 50%;
+            transform: translateX(-50%);
+            font-size: 10px; color: var(--danger, #ef4444);
+            white-space: nowrap; font-weight: 600;
+        }
+        .mem-legend {
+            display: flex; flex-wrap: wrap; gap: 12px;
+            margin-top: 8px; font-size: 11.5px; color: var(--text-3);
+        }
+        .mem-legend i {
+            display: inline-block; width: 9px; height: 9px;
+            border-radius: 2px; margin-right: 5px;
+        }
+        .mem-legend .lg-other i { background: #64748b; }
+        .mem-legend .lg-browser i { background: #0284c7; }
+        .mem-legend .lg-threshold i { background: var(--danger, #ef4444); }
+        .mem-nums {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 8px; margin-top: 10px;
+        }
+        .mem-num .k { font-size: 11px; color: var(--text-3); }
+        .mem-num .v {
+            font-family: var(--font-mono, ui-monospace, monospace);
+            font-size: 14px; font-weight: 700;
+        }
+        @media (max-width: 640px) {
+            .mem-nums { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* ---- 标签页列表 ---- */
+        .tab-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 9px 11px; border-radius: var(--radius-sm);
+            border: 1px solid var(--border, #e5e7eb);
+            background: var(--card-bg, #fff);
+            margin-bottom: 7px;
+        }
+        .tab-item.cur {
+            border-color: var(--primary, #2563eb);
+            background: var(--primary-soft, #eff6ff);
+        }
+        .tab-item .tinfo { flex: 1; min-width: 0; }
+        .tab-item .ttitle {
+            font-size: 13px; font-weight: 600; color: var(--text-1, #0f172a);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .tab-item .turl {
+            font-size: 11px; color: var(--text-3);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .tab-item .tbadge {
+            font-size: 10px; font-weight: 700; padding: 2px 7px;
+            border-radius: 999px; background: var(--primary, #2563eb);
+            color: #fff; flex-shrink: 0;
+        }
+        .tab-item .tops { display: flex; gap: 5px; flex-shrink: 0; }
+
+        /* ---- 浏览器自动关闭提示 ---- */
+        .alert-card {
+            border: 1px solid #fecaca; background: #fef2f2;
+            border-radius: var(--radius-md, 14px); padding: 14px 16px;
+            margin-bottom: 14px;
+        }
+        .alert-card.warn {
+            border-color: #fde68a; background: #fffbeb;
+        }
+        .alert-card .at {
+            font-size: 13.5px; font-weight: 700;
+            color: var(--danger, #b91c1c); margin-bottom: 5px;
+        }
+        .alert-card.warn .at { color: #b45309; }
+        .alert-card .ad {
+            font-size: 12.5px; color: var(--text-2, #475569); line-height: 1.6;
+        }
+
         .tk-stage {
             position: relative;
             width: 100%;
@@ -789,13 +912,18 @@
                         <div class="section-title">⚙️ 浏览器性能</div>
                         <div class="section-desc">控制内存占用与自动回收策略。</div>
                         <div class="field">
-                            <label>内存使用上限</label>
+                            <label>服务器内存占用上限</label>
                             <div style="display:flex;align-items:center;gap:11px;">
                                 <input type="range" id="max_memory_percent" min="30" max="95" step="5" value="90"
                                        oninput="document.getElementById('mmp_val').textContent=this.value+'%'" />
                                 <span id="mmp_val" style="min-width:42px;text-align:center;font-weight:650;">90%</span>
                             </div>
-                            <div class="hint">浏览器内存超过此比例时自动关闭空闲标签页</div>
+                            <div class="hint">整台服务器已用内存超过此比例时自动关闭浏览器（兜底保护）。注意容器内读到的是<b>宿主机</b>内存，若服务器上还跑了别的服务，建议调高或改用下面的浏览器内存上限</div>
+                        </div>
+                        <div class="field">
+                            <label>浏览器自身内存上限（MB）</label>
+                            <input type="number" id="browser_memory_limit_mb" value="0" min="0" max="8192" step="100" />
+                            <div class="hint">只统计浏览器进程组自身的占用，不受其他服务影响。<b>0 表示不限制</b>；小内存服务器建议设 1200 左右</div>
                         </div>
                         <div class="two-col">
                             <div class="field"><label>空闲超时（秒）</label><input type="number" id="idle_timeout" value="300" min="60" max="3600" step="30" /><div class="hint">无操作后自动关闭浏览器</div></div>
@@ -988,6 +1116,64 @@
                         <p>AI 请求接管时，在此实时操作浏览器（验证码 / 滑块等）</p>
                     </div>
 
+                    <!-- 浏览器被自动关闭提示（因内存/空闲被系统关闭时出现） -->
+                    <div class="alert-card" id="tkClosedAlert" style="display:none;">
+                        <div class="at" id="tkClosedTitle">⚠️ 浏览器已被自动关闭</div>
+                        <div class="ad" id="tkClosedDesc"></div>
+                        <div class="btn-row" style="margin-top:10px;">
+                            <button class="btn btn-ghost btn-sm" id="tkClosedDismiss">知道了，不再提示</button>
+                            <button class="btn btn-sm" id="tkClosedReload">刷新状态</button>
+                        </div>
+                    </div>
+
+                    <!-- 服务器 / 浏览器内存占用 -->
+                    <div class="card">
+                        <div class="section-title">内存占用</div>
+                        <div class="section-desc" id="memSummary">正在读取…</div>
+                        <div class="mem-bar-wrap">
+                            <div class="mem-bar">
+                                <div class="mem-bar-seg other" id="memSegOther" style="width:0%"></div>
+                                <div class="mem-bar-seg browser" id="memSegBrowser" style="width:0%"></div>
+                                <div class="mem-bar-mark" id="memMark" style="left:0%;display:none;" data-label="关闭阈值"></div>
+                            </div>
+                        </div>
+                        <div class="mem-legend">
+                            <span class="lg-other"><i></i>其他占用 <b id="memOtherTxt">–</b></span>
+                            <span class="lg-browser"><i></i>浏览器占用 <b id="memBrowserTxt">–</b></span>
+                            <span class="lg-threshold"><i></i>关闭阈值 <b id="memThresholdTxt">–</b></span>
+                        </div>
+                        <div class="mem-nums">
+                            <div class="mem-num"><div class="k">总内存</div><div class="v" id="memTotalTxt">–</div></div>
+                            <div class="mem-num"><div class="k">已用 / 占比</div><div class="v" id="memUsedTxt">–</div></div>
+                            <div class="mem-num"><div class="k">关闭阈值</div><div class="v" id="memLimitTxt">–</div></div>
+                            <div class="mem-num"><div class="k">浏览器状态</div><div class="v" id="memStateTxt">–</div></div>
+                        </div>
+                        <div class="btn-row" style="margin-top:10px;">
+                            <button class="btn btn-ghost btn-sm" id="memRefreshBtn">刷新</button>
+                            <button class="btn btn-ghost btn-sm" id="installDepsBtn">安装系统依赖</button>
+                            <span class="tk-kbd-hint" id="installDepsHint">浏览器启动失败（缺系统库）时点这里</span>
+                        </div>
+                    </div>
+
+                    <!-- 标签页管理 -->
+                    <div class="card">
+                        <div class="section-title">标签页管理</div>
+                        <div class="section-desc">查看 AI 当前打开的所有页面，可直接切换 / 关闭，或新建一个页面。</div>
+                        <div class="two-col">
+                            <div class="field">
+                                <label>新标签页地址（留空则打开默认页）</label>
+                                <input id="tabNewUrl" placeholder="https://example.com" />
+                            </div>
+                        </div>
+                        <div class="btn-row" style="margin-top:8px;">
+                            <button class="btn btn-sm" id="tabNewBtn">新建标签页</button>
+                            <button class="btn btn-ghost btn-sm" id="tabRefreshBtn">刷新列表</button>
+                            <button class="btn btn-danger-ghost btn-sm" id="tabCloseAllBtn">一键关闭所有标签页</button>
+                        </div>
+                        <div id="tabList" class="list" style="margin-top:12px;"></div>
+                        <div class="status" id="tabStatus"></div>
+                    </div>
+
                     <!-- 未启用提示 -->
                     <div class="card" id="tkDisabled" style="display:none;">
                         <div class="section-title">⚠️ 浏览器尚未启用</div>
@@ -1001,8 +1187,8 @@
 
                     <!-- 待命 -->
                     <div class="card" id="tkIdle" style="display:none;">
-                        <div class="section-title">✅ 浏览器已就绪</div>
-                        <div class="section-desc">
+                        <div class="section-title" id="tkIdleTitle">✅ 浏览器已就绪</div>
+                        <div class="section-desc" id="tkIdleDesc">
                             当前没有进行中的接管请求。当 AI 遇到无法自动完成的步骤（如验证码）时，
                             会主动请求接管，届时本页面会自动出现实时画面。
                         </div>
@@ -1021,6 +1207,30 @@
                         </div>
                         <div class="section-desc" id="tkHint">
                             下面的画面是浏览器实时截图，直接在上面点击 / 拖动 / 长按 / 输入即可操作。完成后点「结束操作」把权限交还 AI。
+                        </div>
+
+                        <!-- 实时指标：全部在用户端计算，服务端卡住能一眼看出 -->
+                        <div class="tk-metrics">
+                            <div class="tk-metric">
+                                <div class="k">画面延迟</div>
+                                <div class="v" id="mtrLatency">–</div>
+                                <div class="s" id="mtrLatencySub">帧到达间隔</div>
+                            </div>
+                            <div class="tk-metric">
+                                <div class="k">服务器刷新率</div>
+                                <div class="v" id="mtrFps">–</div>
+                                <div class="s" id="mtrFpsSub">实收帧 / 秒</div>
+                            </div>
+                            <div class="tk-metric">
+                                <div class="k">下行带宽</div>
+                                <div class="v" id="mtrBandwidth">–</div>
+                                <div class="s" id="mtrBandwidthSub">服务器 → 本机</div>
+                            </div>
+                            <div class="tk-metric">
+                                <div class="k">累计帧数</div>
+                                <div class="v" id="mtrFrames">0</div>
+                                <div class="s" id="mtrFramesSub">本次接管</div>
+                            </div>
                         </div>
 
                         <div class="tk-stage" id="tkStage">
@@ -1455,7 +1665,7 @@ if (!window.AstrBotPluginPage) {
 
             if (page === 'capability') loadCapability();
             if (page === 'workspace') loadFiles();
-            if (page === 'takeover') loadTakeoverStatus();
+            if (page === 'takeover') { loadTakeoverStatus(); loadTabs(); loadMemory(); }
             if (page === 'memory') { loadMemoryStats(); loadMemoryFilters(); loadMemories(); }
             if (page === 'schedule') loadSchedules();
             if (page === 'permission') loadPermission();
@@ -1548,6 +1758,7 @@ if (!window.AstrBotPluginPage) {
                 verify_browser: checked('verify_browser'),
                 // 浏览器性能
                 max_memory_percent: num('max_memory_percent', 90),
+                browser_memory_limit_mb: num('browser_memory_limit_mb', 0),
                 idle_timeout: num('idle_timeout', 300),
                 monitor_interval: num('monitor_interval', 10),
             };
@@ -2390,6 +2601,158 @@ if (!window.AstrBotPluginPage) {
             tkActive.style.display = view === 'active' ? '' : 'none';
         }
 
+        // ==================== 内存占用进度条 ====================
+        const memSegOther = document.getElementById('memSegOther');
+        const memSegBrowser = document.getElementById('memSegBrowser');
+        const memMark = document.getElementById('memMark');
+        const memSummary = document.getElementById('memSummary');
+
+        function fmtMB(mb) {
+            if (mb === null || mb === undefined || isNaN(mb)) return '–';
+            if (mb >= 1024) return (mb / 1024).toFixed(2) + ' GB';
+            return Math.round(mb) + ' MB';
+        }
+
+        function renderMemory(mem) {
+            if (!mem) {
+                if (memSummary) memSummary.textContent = '暂无内存数据';
+                return;
+            }
+            const total = mem.total || 0;
+            if (!total) {
+                if (memSummary) memSummary.textContent = '无法读取内存信息';
+                return;
+            }
+
+            const other = mem.other || 0;
+            const browser = mem.browser || 0;
+            const pctOther = Math.min(100, other / total * 100);
+            const pctBrowser = Math.min(100 - pctOther, browser / total * 100);
+            const pctThreshold = mem.threshold
+                ? Math.min(100, mem.threshold / total * 100) : 0;
+
+            if (memSegOther) memSegOther.style.width = pctOther.toFixed(2) + '%';
+            if (memSegBrowser) {
+                memSegBrowser.style.left = pctOther.toFixed(2) + '%';
+                memSegBrowser.style.width = pctBrowser.toFixed(2) + '%';
+            }
+            if (memMark) {
+                if (pctThreshold > 0 && pctThreshold < 100) {
+                    memMark.style.display = '';
+                    memMark.style.left = pctThreshold.toFixed(2) + '%';
+                    memMark.setAttribute('data-label',
+                        '关闭阈值 ' + mem.limit_percent + '%');
+                } else {
+                    memMark.style.display = 'none';
+                }
+            }
+
+            if (memSummary) {
+                const state = mem.browser_running ? '浏览器运行中' : '浏览器未启动';
+                let extra = '';
+                if (mem.browser_running && mem.browser_procs) {
+                    extra = ` · 浏览器 ${mem.browser_procs} 个进程`;
+                    if (mem.browser_zombies) {
+                        extra += `（${mem.browser_zombies} 个僵尸待回收）`;
+                    }
+                }
+                memSummary.textContent =
+                    `服务器已用 ${mem.percent}%（${fmtMB(mem.used)} / ${fmtMB(total)}）· ${state}${extra}`;
+            }
+
+            const setTxt = (id, v) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = v;
+            };
+            setTxt('memOtherTxt', fmtMB(other));
+            setTxt('memBrowserTxt', mem.browser_running ? fmtMB(browser) : '未运行');
+            setTxt('memThresholdTxt',
+                mem.browser_limit_mb > 0
+                    ? fmtMB(mem.browser_limit_mb)
+                    : (mem.threshold ? fmtMB(mem.threshold) + ` (${mem.limit_percent}%)` : '未启用'));
+            setTxt('memTotalTxt', fmtMB(total));
+            setTxt('memUsedTxt', `${mem.percent}%`);
+            setTxt('memLimitTxt',
+                mem.browser_limit_mb > 0
+                    ? `${mem.browser_limit_mb} MB`
+                    : (mem.limit_percent ? mem.limit_percent + '%' : '未启用'));
+            setTxt('memStateTxt',
+                mem.browser_running
+                    ? `运行中 (${mem.browser_procs || 0} 进程)`
+                    : '已关闭');
+        }
+
+        async function loadMemory() {
+            try {
+                const res = await bridge.apiGet('browser_memory');
+                if (!res.success) throw new Error(res.error || '查询失败');
+                renderMemory(res);
+                showClosedAlert(res.last_close, res.browser_running);
+            } catch (e) {
+                if (memSummary) memSummary.textContent = '读取失败: ' + e.message;
+            }
+        }
+
+        // ---- 浏览器被自动关闭的提示 ----
+        // 自动关闭（内存/空闲）此前是静默的，用户只看到「画面没了」却不知原因。
+        // 现在把关闭原因挂到状态里，前端主动展示，并支持「不再提示」。
+        const tkClosedAlert = document.getElementById('tkClosedAlert');
+        const tkClosedTitle = document.getElementById('tkClosedTitle');
+        const tkClosedDesc = document.getElementById('tkClosedDesc');
+        let tkClosedDismissedAt = 0;
+
+        function showClosedAlert(lastClose, running) {
+            if (!tkClosedAlert) return;
+            if (!lastClose || running) {
+                tkClosedAlert.style.display = 'none';
+                return;
+            }
+            const at = lastClose.at || 0;
+            if (at <= tkClosedDismissedAt) {
+                tkClosedAlert.style.display = 'none';
+                return;
+            }
+            const reason = lastClose.reason || '';
+            const detail = lastClose.detail || '';
+            const isIdle = reason === 'idle';
+
+            tkClosedAlert.className = 'alert-card' + (isIdle ? ' warn' : '');
+            tkClosedTitle.textContent = isIdle
+                ? '💤 浏览器因长时间空闲已自动关闭'
+                : '⚠️ 浏览器因内存占用过高已自动关闭';
+            const when = at ? new Date(at * 1000).toLocaleTimeString() : '';
+            tkClosedDesc.innerHTML =
+                escapeHtml(detail || '') +
+                (when ? `<br><span style="color:var(--text-3)">关闭时间：${escapeHtml(when)}</span>` : '') +
+                '<br><span style="color:var(--text-3)">下次 AI 操作浏览器时会自动重新启动。' +
+                (isIdle
+                    ? '若不想被自动关闭，可在「配置」里调大「浏览器空闲超时」。'
+                    : '若频繁出现，可在「配置」里调大「服务器内存占用上限」或调小「浏览器标签页上限」。') +
+                '</span>';
+            tkClosedAlert.style.display = '';
+        }
+
+        // ---- 待命卡片文案：区分「浏览器在跑」与「已关闭」----
+        const tkIdleTitle = document.getElementById('tkIdleTitle');
+        const tkIdleDesc = document.getElementById('tkIdleDesc');
+
+        function renderIdleState(res) {
+            if (!tkIdleTitle || !tkIdleDesc) return;
+            const running = !!(res && res.browser_running);
+            if (running) {
+                tkIdleTitle.textContent = '✅ 浏览器已就绪';
+                tkIdleDesc.textContent =
+                    '当前没有进行中的接管请求。当 AI 遇到无法自动完成的步骤（如验证码）时，'
+                    + '会主动请求接管，届时本页面会自动出现实时画面。';
+            } else {
+                // 别把「未启动」写成「已就绪」——用户会以为浏览器在后台空转占内存
+                tkIdleTitle.textContent = '💤 浏览器未运行';
+                tkIdleDesc.textContent =
+                    '浏览器当前未在后台运行，不占用内存。下次 AI 操作浏览器时会自动启动'
+                    + '（也可让 AI 先执行一次浏览器操作，或稍后点「刷新状态」查看）。';
+            }
+        }
+
         // ---- 状态查询 ----
         async function loadTakeoverStatus() {
             try {
@@ -2406,10 +2769,153 @@ if (!window.AstrBotPluginPage) {
                 } else {
                     if (tkActiveFlag) exitTakeover();
                     setTkView('idle');
+                    renderIdleState(res);
+                }
+                // 内存与关闭提示随状态一起刷新
+                if (res.memory) {
+                    renderMemory(res.memory);
+                    showClosedAlert(res.memory.last_close, res.memory.browser_running);
                 }
             } catch (e) {
                 showTkStatus('状态查询失败: ' + e.message, 'error');
             }
+        }
+
+        // ==================== 标签页管理 ====================
+        const tabList = document.getElementById('tabList');
+        const tabStatusEl = document.getElementById('tabStatus');
+
+        function showTabStatus(msg, type) {
+            tabStatusEl.textContent = msg;
+            tabStatusEl.className = `status show ${type}`;
+            setTimeout(() => tabStatusEl.classList.remove('show'), 3000);
+        }
+
+        async function loadTabs() {
+            if (!tabList) return;
+            try {
+                const res = await bridge.apiGet('tabs');
+                if (!res.success) {
+                    tabList.innerHTML = '<div class="empty">'
+                        + escapeHtml(res.error || '加载失败') + '</div>';
+                    return;
+                }
+                if (res.memory) {
+                    renderMemory(res.memory);
+                    showClosedAlert(res.memory.last_close, res.memory.browser_running);
+                }
+                const tabs = res.tabs || [];
+                if (!tabs.length) {
+                    tabList.innerHTML = '<div class="empty">'
+                        + (res.running ? '暂无打开的标签页' : '浏览器未启动（AI 首次操作时会自动启动）')
+                        + '</div>';
+                    return;
+                }
+                tabList.innerHTML = tabs.map(t => {
+                    const url = t.url || '';
+                    const title = t.title || url || '(无标题)';
+                    return `
+                    <div class="tab-item ${t.active ? 'cur' : ''}">
+                        <div class="tinfo">
+                            <div class="ttitle">${escapeHtml(title)}</div>
+                            <div class="turl">${escapeHtml(url)}</div>
+                        </div>
+                        ${t.active ? '<span class="tbadge">当前</span>' : `
+                        <div class="tops">
+                            <button class="btn btn-ghost btn-xs" data-tab-switch="${t.index}">切换</button>
+                            <button class="btn btn-danger-ghost btn-xs" data-tab-close="${t.index}">关闭</button>
+                        </div>`}
+                    </div>`;
+                }).join('');
+
+                tabList.querySelectorAll('[data-tab-switch]').forEach(b => {
+                    b.addEventListener('click', () =>
+                        doTabAction('switch', { index: parseInt(b.dataset.tabSwitch, 10) }, '已切换'));
+                });
+                tabList.querySelectorAll('[data-tab-close]').forEach(b => {
+                    b.addEventListener('click', () =>
+                        doTabAction('close', { index: parseInt(b.dataset.tabClose, 10) }, '已关闭'));
+                });
+            } catch (e) {
+                tabList.innerHTML = '<div class="empty">请求错误: '
+                    + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        async function doTabAction(action, payload, okMsg) {
+            try {
+                const res = await bridge.apiPost('tab_action',
+                    Object.assign({ action }, payload));
+                if (res.success) {
+                    showTabStatus(res.message || okMsg, 'success');
+                    loadTabs();
+                } else {
+                    showTabStatus(res.error || '操作失败', 'error');
+                }
+            } catch (e) {
+                showTabStatus(e.message, 'error');
+            }
+        }
+
+        if (document.getElementById('tabRefreshBtn')) {
+            document.getElementById('tabRefreshBtn').addEventListener('click', loadTabs);
+
+            document.getElementById('tabNewBtn').addEventListener('click', () => {
+                const url = (document.getElementById('tabNewUrl').value || '').trim();
+                doTabAction('new', { url }, '已新建标签页').then(() => {
+                    document.getElementById('tabNewUrl').value = '';
+                });
+            });
+
+            document.getElementById('tabCloseAllBtn').addEventListener('click', async () => {
+                if (!await askConfirm(
+                        '确定关闭<b>所有</b>标签页？<br>'
+                        + '<span style="font-size:12px;color:var(--text-3)">'
+                        + '会保留一个空白页以便继续操作。</span>',
+                        { title: '关闭所有标签页', okText: '全部关闭' })) return;
+                doTabAction('close_all', {}, '已关闭所有标签页');
+            });
+
+            document.getElementById('memRefreshBtn').addEventListener('click', loadMemory);
+
+            // ---- 一键安装浏览器系统依赖（webkit/firefox 缺 gtk/gstreamer 等库时用）----
+            document.getElementById('installDepsBtn').addEventListener('click', async () => {
+                const hint = document.getElementById('installDepsHint');
+                const btn = document.getElementById('installDepsBtn');
+                const browser = (tkState && tkState.browser_type) || '';
+                if (!await askConfirm(
+                        '将为当前浏览器安装所需的<b>系统依赖库</b>（gtk / gstreamer 等）。<br>'
+                        + '<span style="font-size:12px;color:var(--text-3)">'
+                        + '仅在浏览器提示「缺少系统依赖 / Host system is missing dependencies」时需要。'
+                        + '需要容器内有 root 权限与 apt，过程可能持续几分钟。</span>',
+                        { title: '安装系统依赖', okText: '开始安装', danger: false })) return;
+                btn.disabled = true;
+                hint.textContent = '安装中，请稍候（可能几分钟）…';
+                try {
+                    const res = await bridge.apiPost('install_deps', { browser });
+                    if (res.success) {
+                        hint.textContent = res.message || '安装完成';
+                        showTkStatus(res.message || '系统依赖安装完成', 'success');
+                        loadMemory();
+                    } else {
+                        hint.textContent = '失败: ' + (res.error || '未知错误');
+                        showTkStatus(res.error || '安装失败', 'error');
+                    }
+                } catch (e) {
+                    hint.textContent = '请求错误: ' + e.message;
+                } finally {
+                    btn.disabled = false;
+                }
+            });
+
+            document.getElementById('tkClosedDismiss').addEventListener('click', () => {
+                const lc = tkState && tkState.memory && tkState.memory.last_close;
+                tkClosedDismissedAt = (lc && lc.at) || Date.now() / 1000;
+                tkClosedAlert.style.display = 'none';
+            });
+            document.getElementById('tkClosedReload').addEventListener('click', () => {
+                loadTakeoverStatus(); loadTabs();
+            });
         }
 
         // ---- 进入接管：订阅画面 ----
@@ -2441,6 +2947,205 @@ if (!window.AstrBotPluginPage) {
             unsubscribeFrames();
             tkCursor.classList.remove('on');
             setTkView('idle');
+            resetMetrics();
+        }
+
+        // ==================== 接管实时指标（全部在用户端计算） ====================
+        // 服务端只负责推帧与心跳，指标一律由浏览器端测量：
+        // 这样「服务器卡住」与「本机网络慢」能被区分开，用户一眼看出问题在哪。
+        const mtrLatency = document.getElementById('mtrLatency');
+        const mtrLatencySub = document.getElementById('mtrLatencySub');
+        const mtrFps = document.getElementById('mtrFps');
+        const mtrFpsSub = document.getElementById('mtrFpsSub');
+        const mtrBandwidth = document.getElementById('mtrBandwidth');
+        const mtrBandwidthSub = document.getElementById('mtrBandwidthSub');
+        const mtrFrames = document.getElementById('mtrFrames');
+        const mtrFramesSub = document.getElementById('mtrFramesSub');
+
+        // 画面是「页面变化驱动」的：静止页面不推新帧是正常现象，
+        // 因此判断服务器死活要看 **状态心跳（state 事件）**，不是看帧。
+        const TK_STALL_MS = 3000;        // 心跳超时 → 服务器可能卡住
+        const TK_IDLE_HINT_MS = 3000;    // 无新帧但心跳正常 → 画面静止（正常）
+
+        let tkMtr = {
+            count: 0,             // 累计帧数
+            lastAt: 0,            // 上一帧到达时间
+            bytesWin: [],         // [时间, 字节] 窗口，用于算带宽
+            beatAt: 0,            // 最近一次收到心跳的本地时刻
+            latency: null,        // 最近一次实测心跳延迟（ms）
+            offset: null,         // 两端时钟偏移（首次采样估计）
+            lastServerTs: 0,      // 上一个心跳的服务端时间戳
+            lastServerAt: 0,      // 上一个心跳的本地接收时刻
+            sendInterval: null,   // 服务端心跳发送间隔估计（ms）
+            timer: null,
+        };
+
+        function resetMetrics() {
+            tkMtr.count = 0;
+            tkMtr.lastAt = 0;
+            tkMtr.bytesWin = [];
+            tkMtr.beatAt = 0;
+            tkMtr.latency = null;
+            tkMtr.offset = null;
+            tkMtr.lastServerTs = 0;
+            tkMtr.lastServerAt = 0;
+            tkMtr.sendInterval = null;
+            if (mtrLatency) mtrLatency.textContent = '–';
+            if (mtrFps) mtrFps.textContent = '–';
+            if (mtrBandwidth) mtrBandwidth.textContent = '–';
+            if (mtrFrames) mtrFrames.textContent = '0';
+            if (mtrLatencySub) mtrLatencySub.textContent = '服务器心跳延迟';
+            if (mtrFpsSub) mtrFpsSub.textContent = '实收帧 / 秒';
+            if (mtrBandwidthSub) mtrBandwidthSub.textContent = '服务器 → 本机';
+            setMtrClass(mtrLatency, '');
+        }
+
+        function setMtrClass(el, cls) {
+            if (!el) return;
+            el.className = 'v' + (cls ? ' ' + cls : '');
+        }
+
+        /** 收到一帧时记录（base64 长度 → 近似原始字节 = len * 3/4） */
+        function recordFrame(b64Len) {
+            const now = performance.now();
+            tkMtr.count += 1;
+            tkMtr.lastAt = now;
+
+            const bytes = Math.floor((b64Len || 0) * 3 / 4);
+            tkMtr.bytesWin.push([now, bytes]);
+            const cutoff = now - 5000;
+            while (tkMtr.bytesWin.length && tkMtr.bytesWin[0][0] < cutoff) {
+                tkMtr.bytesWin.shift();
+            }
+        }
+
+        /**
+         * 收到服务端 state 心跳。
+         *
+         * 延迟必须在**收到的那一刻**算好并缓存：若留到每秒刷新时再算，
+         * 数值会随刷新时机波动（心跳间隔 0.5s / 刷新 1s，会夹带 0~500ms 抖动）。
+         *
+         * 算法：服务端 payload 带自身时间戳 ts，首次采样估出两端时钟偏移，
+         * 之后「本地收到时刻 − ts」即为端到端单向延迟。
+         */
+        function recordState(st) {
+            if (!st || typeof st.ts !== 'number') return;
+            const nowLocal = Date.now();
+            const nowPerf = performance.now();
+            const serverMs = st.ts * 1000;
+
+            // 首个心跳只用于对齐时钟，不计入延迟
+            if (tkMtr.offset === null) {
+                tkMtr.offset = nowLocal - serverMs;
+            } else {
+                const lat = nowLocal - serverMs - tkMtr.offset;
+                // 只接受合理范围，剔除首次对齐误差造成的负值/离谱值
+                if (lat >= 0 && lat < 60000) {
+                    tkMtr.latency = lat;
+                }
+            }
+
+            // 估计服务端心跳发送间隔（用连续两个心跳的服务端时间戳差）
+            if (tkMtr.lastServerTs > 0) {
+                const si = serverMs - tkMtr.lastServerTs;
+                if (si > 0 && si < 10000) tkMtr.sendInterval = si;
+            }
+            tkMtr.lastServerTs = serverMs;
+            tkMtr.lastServerAt = nowPerf;
+            tkMtr.beatAt = nowPerf;
+        }
+
+        /** 每秒刷新一次指标面板 */
+        function startMetrics() {
+            if (tkMtr.timer) return;
+            tkMtr.timer = setInterval(() => {
+                if (!tkActiveFlag) return;
+                refreshMetrics();
+            }, 1000);
+        }
+
+        function refreshMetrics() {
+            const now = performance.now();
+
+            if (mtrFrames) mtrFrames.textContent = String(tkMtr.count);
+            if (mtrFramesSub) {
+                mtrFramesSub.textContent = tkMtr.count > 0 ? '本次接管' : '尚未收到画面';
+            }
+
+            // ---- 判活：状态心跳才是真心跳 ----
+            const beatAge = tkMtr.beatAt > 0 ? (now - tkMtr.beatAt) : -1;
+            const serverStalled = beatAge > TK_STALL_MS;
+            const frameIdle = tkMtr.lastAt > 0 && (now - tkMtr.lastAt) > TK_IDLE_HINT_MS;
+
+            // ---- 延迟：用收到心跳时实测并缓存的值 ----
+            if (tkMtr.latency !== null) {
+                if (mtrLatency) {
+                    mtrLatency.textContent = tkMtr.latency.toFixed(0) + ' ms';
+                    setMtrClass(mtrLatency, serverStalled ? 'danger'
+                        : (tkMtr.latency > 2000 ? 'warn' : 'ok'));
+                }
+                if (mtrLatencySub) {
+                    mtrLatencySub.textContent = serverStalled
+                        ? '心跳中断 ' + (beatAge / 1000).toFixed(1) + 's'
+                        : '服务器心跳延迟';
+                }
+            } else if (tkMtr.beatAt === 0) {
+                if (mtrLatency) {
+                    mtrLatency.textContent = serverStalled ? '无心跳' : '–';
+                    setMtrClass(mtrLatency, serverStalled ? 'danger' : '');
+                }
+                if (mtrLatencySub && serverStalled) {
+                    mtrLatencySub.textContent =
+                        '心跳中断 ' + (beatAge / 1000).toFixed(1) + 's';
+                }
+            }
+
+            // ---- 刷新率：最近 5 秒实收帧数 / 时长 ----
+            const win = tkMtr.bytesWin;
+            let fpsVal = 0;
+            if (win.length >= 1) {
+                const span = Math.max(1, (now - win[0][0]) / 1000);
+                fpsVal = win.length / span;
+            }
+            if (mtrFps) {
+                mtrFps.textContent = tkMtr.count === 0 ? '–' : fpsVal.toFixed(1) + ' fps';
+                setMtrClass(mtrFps, serverStalled ? 'danger'
+                    : (frameIdle && tkMtr.count > 0 ? 'warn' : 'ok'));
+            }
+            if (mtrFpsSub) {
+                if (serverStalled) {
+                    mtrFpsSub.textContent = '服务器无响应';
+                } else if (frameIdle) {
+                    mtrFpsSub.textContent = '画面无变化（正常）';
+                } else {
+                    mtrFpsSub.textContent = '实收帧 / 秒';
+                }
+            }
+
+            // ---- 带宽：窗口内字节 / 窗口时长 ----
+            if (mtrBandwidth) {
+                if (win.length >= 2) {
+                    const span = Math.max(1, (now - win[0][0]) / 1000);
+                    const totalBytes = win.reduce((s, it) => s + it[1], 0);
+                    const kbps = totalBytes / span / 1024;
+                    mtrBandwidth.textContent = kbps >= 1024
+                        ? (kbps / 1024).toFixed(2) + ' MB/s'
+                        : kbps.toFixed(0) + ' KB/s';
+                    setMtrClass(mtrBandwidth,
+                        serverStalled ? 'danger' : (frameIdle ? 'warn' : 'ok'));
+                } else if (tkMtr.count === 0) {
+                    mtrBandwidth.textContent = '–';
+                }
+            }
+            if (mtrBandwidthSub) {
+                if (serverStalled) {
+                    mtrBandwidthSub.textContent = '无数据流入';
+                } else if (frameIdle) {
+                    mtrBandwidthSub.textContent = '静止画面无流量';
+                } else {
+                    mtrBandwidthSub.textContent = '服务器 → 本机';
+                }
+            }
         }
 
         // ---- SSE 画面订阅 ----
@@ -2449,6 +3154,8 @@ if (!window.AstrBotPluginPage) {
                 showOverlay('当前 AstrBot 版本不支持画面流，请升级 AstrBot');
                 return;
             }
+            resetMetrics();
+            startMetrics();
             bridge.subscribeSSE('takeover_stream', {
                 onOpen: () => { hideOverlay(); },
                 onError: () => { showOverlay('画面连接中断，正在重试…'); },
@@ -2456,18 +3163,29 @@ if (!window.AstrBotPluginPage) {
                     const evType = msg.eventType || 'message';
                     if (evType === 'frame') {
                         if (msg.raw) {
+                            // 指标在用户端计算：既量「帧到达节奏」也量「数据量」
+                            recordFrame(msg.raw.length);
                             paintFrame(msg.raw);
                             hideOverlay();
+                            refreshMetrics();
                         }
                     } else if (evType === 'state') {
                         const st = msg.parsed;
                         if (st && typeof st === 'object') {
+                            // 心跳：既用于算延迟/判活，也让内存进度条实时刷新
+                            recordState(st);
                             tkState = Object.assign(tkState || {}, { session: st });
                             if (st.ended) {
                                 exitTakeover();
                                 return;
                             }
                             updateTimer(st);
+                            if (st.memory) {
+                                renderMemory(st.memory);
+                                showClosedAlert(st.memory.last_close,
+                                                st.memory.browser_running);
+                            }
+                            refreshMetrics();
                         }
                     }
                 }

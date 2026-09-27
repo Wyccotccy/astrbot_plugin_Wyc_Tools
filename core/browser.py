@@ -763,6 +763,78 @@ class BrowserCore:
         async with self._op_lock:
             return await asyncio.gather(*(p.title() for p in self.all_pages))
 
+    async def tabs_detail(self) -> list[dict]:
+        """标签页清单（供 WebUI 展示与管理）。
+
+        返回每项的 index / title / url / active，标题取不到时回退到 URL。
+        """
+        async with self._op_lock:
+            cur = self.current_index if self.current_index is not None else 0
+            items: list[dict] = []
+            for i, p in enumerate(list(self.all_pages)):
+                try:
+                    title = await p.title()
+                except Exception:
+                    title = ""
+                try:
+                    url = p.url
+                except Exception:
+                    url = ""
+                items.append({
+                    "index": i,
+                    "title": title or url or "(无标题)",
+                    "url": url,
+                    "active": i == cur,
+                })
+            return items
+
+    async def new_tab(self, url: str = "") -> str:
+        """新建标签页（不传 url 则打开默认页）。"""
+        target = (url or "").strip() or self.config.get("default_url") or "about:blank"
+        async with self._op_lock:
+            context = self._require_context()
+            while len(self.all_pages) >= self.config.get("max_pages", 10):
+                old = self.all_pages.pop(0)
+                await self._discard_page(old)
+            page = await context.new_page()
+            await self._setup_render_mode_route(page)
+            try:
+                await self._safe_await(
+                    lambda: page.goto(target, wait_until="domcontentloaded"),
+                )
+            except Exception:
+                await self._discard_page(page)
+                return "新标签页打开失败"
+            self.all_pages.append(page)
+            self.current_index = len(self.all_pages) - 1
+            self.page = page
+            await self.save_cookies()
+            return f"已新建标签页：{target}"
+
+    async def close_all_tabs(self, keep_one: bool = True) -> str:
+        """一键关闭所有标签页。
+
+        :param keep_one: 是否保留（并重建）一个空白标签页。浏览器上下文
+                         一个页面都不剩时很多操作会异常，故默认保留一个。
+        """
+        async with self._op_lock:
+            closed = len(self.all_pages)
+            for page in list(self.all_pages):
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            self.all_pages.clear()
+            self.current_index = None
+            self.page = None
+
+            if keep_one:
+                try:
+                    await self._ensure_page()
+                except Exception as e:
+                    logger.warning(f"[Browser] 关闭全部标签页后重建失败: {e}")
+            return f"已关闭 {closed} 个标签页"
+
     async def switch_tab(self, index: int) -> str | None:
         async with self._op_lock:
             if not (0 <= index < len(self.all_pages)):

@@ -2,7 +2,7 @@ name: "astrbot_plugin_qzone_tools"
 display_name: "更多LLM工具"
 author: "Wyccotccy"
 desc: "支持机器人发送定时消息，发送QQ空间，发送戳一戳等给群聊或者私聊，以及更多LLM工具（仅支持Napcat version > 4.17.55）"
-version: "5.6.2"
+version: "5.6.3"
 repo: "https://github.com/Wyccotccy/astrbot_plugin_qzone_tools"
 support_platforms:
   - aiocqhttp
