@@ -445,7 +445,7 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-### v5.7.1 — 仓库更名 + 高危工具权限硬下限修复 + 补充搜索词
+### v5.7.5 — 仓库更名 + 高危工具权限硬下限修复 + 补充搜索词
 
 **🏷️ 仓库更名**：`astrbot_plugin_qzone_tools`（QzoneTools）→
 `astrbot_plugin_Wyc_Tools`（Wyc Tools）。GitHub 旧地址会自动跳转到新地址；
