@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.7.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.7.1-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -48,13 +48,13 @@
 
 ### 方式一：插件市场（推荐）
 
-AstrBot WebUI → 插件市场 → 搜索 `qzone_tools` → 安装
+AstrBot WebUI → 插件市场 → 搜索 `Wyc_Tools` → 安装
 
 ### 方式二：Git 克隆
 
 ```bash
 cd /AstrBot/data/plugins
-git clone https://github.com/Wyccotccy/astrbot_plugin_qzone_tools.git
+git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 ```
 
 ### 方式三：手动上传
@@ -434,6 +434,21 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
+### v5.7.1 — 高危工具权限硬下限修复 + 补充搜索词
+
+**🔒 安全修复（严重）**：修复适配器高危工具（/ban、/kick、/退群 等源命令
+带超管门槛的 50 个）可在 WebUI 被降档为「全局」的漏洞——现 perm_default
+为 admin 的适配器工具**永远**按超管档判定，配置无法覆盖；
+WebUI 同步锁定该类工具的下拉框（「超管锁定」徽章）。
+
+**修复**：进入「浏览器接管」页不再误自动拉起浏览器（只读查询不再产生副作用）。
+
+**✨ 新增「补充工具搜索词」页**：每个工具（含适配器工具）可在内置搜索词外
+追加自定义词（列表式 chips，内置词锁定不可删、补充词可增删），
+有改动时右下角浮出保存按钮；显著提升 `search_wyc_tools` 命中率。
+
+**界面**：适配器权限控制页适配手机端；WebUI 头像更换为插件形象图。
+
 ### v5.7.0 — 工具适配器（桥接全生态插件命令给 AI）
 
 **新功能**：把 AstrBot 全生态其他插件的 `@filter.command` 命令自动桥接为
@@ -631,7 +646,7 @@ v5.0.x（图片发送/安全加固）、v4.x（浏览器自动化首版）、v3.
 ## 开发者信息
 
 - **作者**：Wyccotccy
-- **仓库**：https://github.com/Wyccotccy/astrbot_plugin_qzone_tools
+- **仓库**：https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools
 - **反馈**：GitHub Issues 或 QQ 1449783068（12:00–03:00）
 
 ## 许可证

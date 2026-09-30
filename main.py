@@ -1289,6 +1289,8 @@ class Main(Star):
         self._tool_registry = self._build_tool_registry()
         # 工具权限表（独立存储，避免被 AstrBot 配置完整性检查清空）
         self._tool_permissions = self._load_tool_permissions()
+        # 补充搜索词（独立存储；用户为工具追加的关键词，与内置 keywords 叠加）
+        self._tool_keywords = self._load_tool_keywords()
         # 所有工具的 enable_* 开关集合（用于 WebUI 保存白名单，避免开关被丢弃）
         self._tool_enable_keys = {f"enable_{name}" for name in self._tool_registry}
         # 工具适配器：按勾选状态注册命令工具（此时后加载的插件尚未注册，
@@ -1393,13 +1395,21 @@ class Main(Star):
     def _get_tool_permission(self, name: str) -> str:
         """取得工具的有效权限档位：global / groupadmin / admin / disabled。
 
-        优先级：tool_permissions 显式配置 > SENSITIVE_TOOLS 默认 admin > global
+        优先级：适配器硬下限 > tool_permissions 显式配置 > SENSITIVE_TOOLS 默认 admin > global
 
         注意：权限表独立存储于 tool_permissions.json（见 _load_tool_permissions），
         不放在插件主配置里 —— AstrBot 的 check_config_integrity 会把 schema 中
         `items` 为空的 object 类型的子键全部当作"未知配置"删除，导致保存在主配置
         里的 tool_permissions 在重载/重启后被清空（issue #13）。
         """
+        # ---------- 适配器高危工具硬下限（安全红线，不可被降档） ----------
+        # 源命令带 @filter.permission_type(ADMIN) 的（/ban、/kick、/退群…），
+        # 桥接后**必须**保持 admin 档：即便有人在配置里把它改成 global/groupadmin，
+        # 也不能真的放开——否则 AI 可无授权执行禁言、踢人、删好友等操作。
+        if name.startswith(ADAPTER_TOOL_PREFIX):
+            meta = self._tool_registry.get(name)
+            if isinstance(meta, dict) and meta.get("perm_default") == "admin":
+                return "admin"
         tool_perms = self._tool_permissions if isinstance(self._tool_permissions, dict) else {}
         if name in tool_perms:
             perm = tool_perms.get(name)
@@ -1407,15 +1417,72 @@ class Main(Star):
                 return perm
         if name in SENSITIVE_TOOLS:
             return "admin"
-        # 适配器工具：枚举时探测到源命令带 ADMIN 权限装饰器 → 默认 admin 档
-        if name.startswith(ADAPTER_TOOL_PREFIX):
-            meta = self._tool_registry.get(name)
-            if isinstance(meta, dict) and meta.get("perm_default") == "admin":
-                return "admin"
         return "global"
 
     def _permissions_file(self) -> str:
         return os.path.join(self.data_dir, "tool_permissions.json")
+
+    # ==================== 补充搜索词（v5.7.1） ====================
+    # 用户可为任意工具（含适配器工具）追加搜索关键词。
+    # 独立文件存储，与内置 keywords 叠加生效，不改动 registry 里的原始数据。
+
+    def _keywords_file(self) -> str:
+        return os.path.join(self.data_dir, "tool_keywords.json")
+
+    def _load_tool_keywords(self) -> Dict[str, list]:
+        """载入补充搜索词 {tool_name: [kw, ...]}。"""
+        path = self._keywords_file()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            raw = data.get("keywords", {})
+            if not isinstance(raw, dict):
+                return {}
+            out = {}
+            for k, v in raw.items():
+                if isinstance(k, str) and isinstance(v, list):
+                    kws = [str(x).strip() for x in v if str(x).strip()]
+                    if kws:
+                        out[k] = kws
+            return out
+        except Exception as e:
+            logger.error(f"[QZoneTools] 读取 tool_keywords.json 失败: {_safe_error_msg(e)}")
+            return {}
+
+    def _save_tool_keywords(self, keywords: Dict[str, list]) -> bool:
+        """原子写入补充搜索词。"""
+        path = self._keywords_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"keywords": keywords}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True
+        except Exception as e:
+            logger.error(f"[QZoneTools] 写入 tool_keywords.json 失败: {_safe_error_msg(e)}")
+            return False
+
+    def _get_tool_keywords(self, tool_name: str) -> list:
+        """取得某工具的全部搜索词 = 内置 keywords + 用户补充词（去重）。"""
+        meta = self._tool_registry.get(tool_name) or {}
+        builtin = meta.get("keywords") or []
+        if not isinstance(builtin, list):
+            builtin = []
+        extra = []
+        if isinstance(self._tool_keywords, dict):
+            extra = self._tool_keywords.get(tool_name) or []
+        seen, merged = set(), []
+        for kw in list(builtin) + list(extra):
+            s = str(kw).strip()
+            if s and s.lower() not in seen:
+                seen.add(s.lower())
+                merged.append(s)
+        return merged
 
     def _migrate_legacy_dirs(self) -> None:
         """把旧版本误写在插件安装目录内的持久化数据迁移到 data_dir。
@@ -4141,7 +4208,7 @@ class Main(Star):
         query_lower = query.strip().lower()
         matched = []
         for name, meta in available_tools.items():
-            keywords = meta.get("keywords", [])
+            keywords = self._get_tool_keywords(name)
             if (query_lower in name.lower() or
                 query_lower in meta["description"].lower() or
                 any(query_lower in kw.lower() for kw in keywords)):
@@ -4759,6 +4826,8 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/workspace_upload_file", self.handle_workspace_upload_file, ["POST"], "上传文件到工作区")
             self.context.register_web_api(f"/{PLUGIN_NAME}/adapter_list", self.handle_adapter_list, ["GET"], "枚举可桥接命令工具")
             self.context.register_web_api(f"/{PLUGIN_NAME}/adapter_save", self.handle_adapter_save, ["POST"], "保存适配器勾选")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tool_keywords", self.handle_get_tool_keywords, ["GET"], "获取补充搜索词")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tool_keywords_save", self.handle_save_tool_keywords, ["POST"], "保存补充搜索词")
             logger.info("[QZoneTools] WebUI API 已注册")
         except Exception as e:
             logger.error(f"[QZoneTools] 注册失败: {e}")
@@ -4846,6 +4915,76 @@ class Main(Star):
             })
         except Exception as e:
             logger.error(f"[WebUI] 保存适配器勾选失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_get_tool_keywords(self):
+        """返回全部工具的内置关键词 + 用户补充词，供「补充工具搜索词」页编辑。"""
+        try:
+            self._rebuild_adapter_tools()  # 幂等，保证适配器工具也在列表里
+            items = []
+            for name, meta in self._tool_registry.items():
+                builtin = meta.get("keywords") or []
+                if not isinstance(builtin, list):
+                    builtin = []
+                extra = []
+                if isinstance(self._tool_keywords, dict):
+                    extra = self._tool_keywords.get(name) or []
+                items.append({
+                    "tool_name": name,
+                    "description": str(meta.get("description") or "")[:120],
+                    "is_command": bool(meta.get("is_command")),
+                    "builtin_keywords": [str(x) for x in builtin],
+                    "extra_keywords": [str(x) for x in extra],
+                })
+            # 按"适配器工具 + 自有工具"分组排序，方便查找
+            items.sort(key=lambda x: (not x["is_command"], x["tool_name"]))
+            return jsonify({"success": True, "items": items,
+                            "extra_count": sum(len(i["extra_keywords"]) for i in items)})
+        except Exception as e:
+            logger.error(f"[WebUI] 获取补充搜索词失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_save_tool_keywords(self):
+        """保存补充搜索词。仅接受 registry 里真实存在的工具名。
+
+        请求体：{"keywords": {"<tool_name>": ["词1", "词2"]}}
+        传空数组等于清除该工具的补充词；未出现在请求里的工具保持原样（增量合并）。
+        """
+        try:
+            data = await request.get_json()
+            incoming = data.get("keywords", {}) if isinstance(data, dict) else None
+            if not isinstance(incoming, dict):
+                return jsonify({"success": False, "error": "格式错误：keywords 必须是对象"})
+            current = dict(self._tool_keywords) if isinstance(self._tool_keywords, dict) else {}
+            saved, cleared, skipped = 0, 0, 0
+            for tool_name, kws in incoming.items():
+                if not isinstance(tool_name, str) or tool_name not in self._tool_registry:
+                    skipped += 1
+                    continue
+                if not isinstance(kws, list):
+                    skipped += 1
+                    continue
+                cleaned, seen = [], set()
+                for kw in kws:
+                    s = str(kw).strip()
+                    if s and len(s) <= 40 and s.lower() not in seen:
+                        seen.add(s.lower())
+                        cleaned.append(s)
+                    if len(cleaned) >= 100:  # 单工具上限，防滥用
+                        break
+                if cleaned:
+                    current[tool_name] = cleaned
+                    saved += 1
+                else:
+                    if current.pop(tool_name, None) is not None:
+                        cleared += 1
+            if not self._save_tool_keywords(current):
+                return jsonify({"success": False, "error": "写入 tool_keywords.json 失败，请查看日志"})
+            self._tool_keywords = current
+            logger.info(f"[QZoneTools] 补充搜索词已保存（{saved} 个工具，清除 {cleared}，跳过 {skipped}）")
+            return jsonify({"success": True, "saved": saved, "cleared": cleared, "skipped": skipped})
+        except Exception as e:
+            logger.error(f"[WebUI] 保存补充搜索词失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_save_config(self):
@@ -5150,10 +5289,30 @@ class Main(Star):
     # ==================== 标签页管理（v5.6.3） ====================
 
     async def handle_tabs(self):
-        """标签页列表。"""
+        """标签页列表。
+
+        ⚠️ 只读查询：浏览器未运行时**不得启动它**。
+        历史缺陷：此处曾直接调 `supervisor.call("tabs_detail")`，而 `call()`
+        开头会自动启动浏览器（`if not self.browser: await self._start_browser()`），
+        导致「打开接管页 → 前端 loadTabs() → 浏览器被莫名拉起」，
+        用户看到「未启动」1 秒后变「已就绪」。查询状态不该有副作用。
+        """
         if not self.browser_supervisor:
             return jsonify({"success": False, "error": "浏览器未启用"})
         try:
+            # 浏览器没跑就返回空列表 + 内存快照，不做任何启动动作
+            if not getattr(self.browser_supervisor, "browser", None):
+                mem = None
+                try:
+                    mem = self.browser_supervisor.memory_snapshot()
+                except Exception:
+                    pass
+                return jsonify({
+                    "success": True,
+                    "tabs": [],
+                    "memory": mem,
+                    "running": False,
+                })
             tabs = await self.browser_supervisor.call("tabs_detail")
             mem = None
             try:
