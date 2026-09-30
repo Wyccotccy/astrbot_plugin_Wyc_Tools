@@ -1,3 +1,77 @@
+## [5.7.0] - 2026-10-01
+
+### ✨ 新功能：工具适配器（把全生态插件命令桥接给 AI 调用）
+
+**背景**：插件原有 109 个工具是写死的，AstrBot 生态里其他插件的
+`@filter.command` 命令（发说说、退群、好感度查询…）AI 完全够不着——
+它们只服务于人敲命令。本功能把这些命令自动桥接为 AI 可调用的工具。
+
+#### 后端（main.py）
+
+- **自动枚举**：`_enumerate_adapter_commands()` 从 `star_handlers_registry`
+  读取全部 `EventType.AdapterMessageEvent` handler，用 `CommandFilter` 判定命令；
+  - 自动提取：命令名 / 别名 / 来源插件 / 描述（框架注册时存入的 `md.desc`，
+    即 handler 的 docstring）/ 参数表 / 权限装饰器
+  - 排除本插件自身命令：优先用 handler 实例身份判定
+    （框架把 handler 包成 `functools.partial(函数, 插件实例)`），
+    再用模块路径做二级判定
+  - ⚠️ 依赖框架内部 API，无稳定性承诺；字段全用防御式 getattr，
+    AstrBot 升级后表现为"枚举为空/跳过该条"而非崩溃
+- **工具命名**：`Wyc_assistive_tool_<插件名>_<命令名>`；
+  - 中文命令名用 **pypinyin** 转拼音（发说说 → `fa_shuo_shuo`）；
+    pypinyin 不可用时退化为 md5 短码（功能不受影响）
+  - 插件名剥掉 `astrbot_plugin_` 前缀缩短长度
+  - 严格 ≤64 字符 + 仅 `[a-zA-Z0-9_]`（OpenAI/Anthropic/Gemini 的
+    function calling 硬性要求，超长会被 provider 直接 400）；
+    超长则截断 + 4 位 md5 消歧
+- **持久化**：`data_dir/adapter_tools.json`（独立文件 + 原子写），
+  沿用 tool_permissions.json 的模式，避免动态键被配置完整性检查清空
+- **注册**：`_rebuild_adapter_tools()` 幂等重建（先清 `Wyc_assistive_tool_*` 再按勾选建），
+  `__init__` 与保存后各调一次；源命令消失（插件卸载/改名）的条目自动跳过并告警
+- **权限**：枚举时探测到源命令带 `PermissionTypeFilter(ADMIN)` → 该工具默认「超管」档；
+  其余默认「全局」。已勾选工具可在 WebUI「适配器权限控制」页单独降档
+- **执行分支**：`run_wyc_tool` 中 `is_command` 标记的走 `_execute_adapter_command()`
+  - 复用当前对话的真实 event，`copy.copy` 出影子事件并改写 `message_str`
+    （⚠️ 不加 `/` 前缀——框架的 WakingCheckStage 已剥掉 wake_prefix）
+  - typed 模式（框架带参指令）：复用框架自带的
+    `CommandFilter.validate_and_convert_params` 做参数类型转换
+  - raw 模式（命令自行 split）：`args` 字符串拼在命令名后
+  - 两种 handler 形态都消费：**异步生成器**（逐个 yield 并按框架语义
+    `set_result`）与**普通协程**
+  - 结果三通道收集：生成器 yield / `event.send()` 拦截 / `event.get_result()`
+  - 超时按框架 `tool_call_timeout - 12s` 钳制；异常全部捕获返回 error dict，
+    绝不上抛导致插件崩溃
+
+#### 前端（pages/webui/index.html）
+
+- 新增侧边栏选项卡「**工具适配器**」：
+  - 一键枚举全部可桥接命令，按来源插件分组、支持搜索
+  - 每条显示：命令名（含别名 tooltip）、描述、生成的工具名、状态徽章
+    （已注册 / 超管 / 带参指令）
+  - 复选框勾选 → 保存；顶部实时统计「共 N 个命令 · 已勾选 X · 已注册 Y」
+  - 「刷新枚举」按钮（新装插件后点一下即可看到）
+  - **默认全部关闭**，不勾选绝不注册
+- 新增侧边栏选项卡「**适配器权限控制**」：
+  - 只显示已注册的适配器工具，四档权限下拉
+  - 保存时与既有 109 个工具的权限表**合并提交**，不覆盖已有设置
+- 移动端底部 tabbar 同步新增两项（沿用可横向滚动布局）
+- 新增 2 个 WebUI API：`adapter_list`（GET，枚举+状态）、
+  `adapter_save`（POST，仅接受真实枚举到的工具名，防伪造写入）
+
+#### 验证（容器内真实框架环境，26/26 通过）
+
+| 组 | 覆盖 | 结果 |
+|----|------|------|
+| A 枚举 | 100 个命令 / 全 ASCII ≤64 / 排除自身 / 中文转拼音 48 个 / 描述提取 100% / 名称唯一 | ✅ |
+| B 注册 | 首次注册 / 重复 rebuild 幂等 / registry 无重复条目 | ✅ |
+| C 权限 | is_command 标记 / 档位合法 / 未勾选不注册 / disabled 过滤 / ADMIN 装饰器默认超管 | ✅ |
+| D 执行 | handler 解析（partial 已绑实例）/ 协程命令 / 生成器命令（registry 219 个 handler 中 83 个是生成器） | ✅ |
+| E 韧性 | yield 结果捕获 / send 结果捕获 / 源命令消失不注册 / 幽灵命令报错不崩 / 清空无残留 | ✅ |
+
+前端 HTML 结构校验：id 引用差集为空、9 个页面导航一致、标签与括号全配对。
+
+---
+
 ## [5.6.3] - 2026-09-27
 
 ### 🐛 已知 Bug 修复 + 接管页监控增强

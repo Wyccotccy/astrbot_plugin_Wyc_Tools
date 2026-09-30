@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.6.3-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.7.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,24 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.7.0 — 工具适配器（桥接全生态插件命令给 AI）
+
+**新功能**：把 AstrBot 全生态其他插件的 `@filter.command` 命令自动桥接为
+AI 可调用的 wyc-tools 工具，WebUI 勾选即生效。
+
+- **工具适配器页**：一键枚举全部可桥接命令（自动取插件名/描述/参数表/权限门槛），
+  按来源插件分组展示，勾选保存后注册为
+  `Wyc_assistive_tool_<插件名>_<工具名>`；中文命令自动转拼音；
+  **默认全部关闭**，未勾选绝不注册
+- **适配器权限控制页**：对已注册的适配器工具单独设权限档位（四档），
+  与既有 109 个工具的权限表合并保存；源命令带管理员门槛的默认「超管」档
+- **AI 调用**：经 search_wyc_tools → run_wyc_tool 三步协议，
+  支持框架带参指令（自动类型转换）与自行解析 message_str 两类命令，
+  协程 / 异步生成器两种 handler 形态均可执行
+
+设计说明：命令枚举依赖 AstrBot 内部 API（无稳定性承诺），
+所有字段访问均为防御式，框架升级后表现为"枚举为空/跳过该条"而非崩溃。
 
 ### v5.6.3 — 已知 Bug 修复 + 接管页监控增强
 

@@ -259,6 +259,17 @@
         }
         .cat-head::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 
+        /* ==================== 工具适配器 ==================== */
+        .adp-item { flex-direction: column; align-items: stretch; gap: 6px; padding: 11px 13px; }
+        .adp-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
+        .adp-row input[type="checkbox"] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; accent-color: var(--primary); cursor: pointer; }
+        .adp-name { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .adp-badge { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--primary-soft); color: var(--primary); white-space: nowrap; flex-shrink: 0; }
+        .adp-badge.warn { background: rgba(234,138,42,.14); color: var(--warn); }
+        .adp-badge.ok { background: rgba(30,158,106,.13); color: var(--success); }
+        .adp-desc { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .adp-toolname { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-3); overflow-wrap: anywhere; }
+
         /* ==================== 记忆增强 ==================== */
         .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
         .stat-card {
@@ -711,6 +722,14 @@
                 <button class="nav-btn" data-page="permission">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
                     权限控制
+                </button>
+                <button class="nav-btn" data-page="adapter">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7V3M15 7V3"/><path d="M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg>
+                    工具适配器
+                </button>
+                <button class="nav-btn" data-page="adapterperm">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M10 10h4"/></svg>
+                    适配器权限控制
                 </button>
             </nav>
             <div class="sidebar-foot">Wyccotccy &amp; 烬熵Cinder</div>
@@ -1457,6 +1476,61 @@
                     </div>
                 </div>
 
+                <!-- ======== 工具适配器 ======== -->
+                <div id="adapterPage" class="content">
+                    <div class="page-head">
+                        <h1>工具适配器</h1>
+                        <p>把其他插件的命令桥接为 AI 可调用的工具</p>
+                    </div>
+                    <div class="card">
+                        <div class="section-title">命令列表</div>
+                        <div class="section-desc">
+                            枚举 AstrBot 全部已加载插件的命令（不含本插件自带命令），勾选后注册为
+                            <strong>Wyc_assistive_tool_&lt;插件名&gt;_&lt;工具名&gt;</strong>，
+                            AI 即可通过 search_wyc_tools → run_wyc_tool 调用。<strong>默认全部关闭</strong>。
+                            新安装插件后请点「刷新枚举」；来源命令带管理员门槛的，注册后默认「超管」档。
+                        </div>
+                        <div class="filter-bar">
+                            <button class="btn btn-ghost btn-sm" id="adapterRefreshBtn">刷新枚举</button>
+                            <input type="text" id="adapterFilter" placeholder="搜索命令 / 插件…" style="width:auto;min-width:140px;flex:1;" />
+                            <span id="adapterStat" style="font-size:12.5px;color:var(--text-3);white-space:nowrap;"></span>
+                        </div>
+                        <div id="adapterList" class="tool-grid"></div>
+                        <div class="btn-row" style="margin-top:16px;">
+                            <button class="btn" id="adapterSaveBtn">保存勾选</button>
+                            <span id="adapterLoading" class="loading-text"></span>
+                        </div>
+                        <div id="adapterStatus" class="status"></div>
+                    </div>
+                </div>
+
+                <!-- ======== 适配器权限控制 ======== -->
+                <div id="adapterpermPage" class="content">
+                    <div class="page-head">
+                        <h1>适配器权限控制</h1>
+                        <p>已启用的适配器工具的访问权限档位</p>
+                    </div>
+                    <div class="card">
+                        <div class="section-title">已启用工具</div>
+                        <div class="section-desc">
+                            仅显示已勾选注册的 Wyc_assistive_tool_* 工具。
+                            <strong>全局</strong> = 所有人可用 ·
+                            <strong>群主/管理员（仅群聊）</strong> = 私聊自动按超管处理 ·
+                            <strong>超管</strong> = 仅 AstrBot 全局管理员 ·
+                            <strong>禁用</strong> = 任何人不可用（AI 也看不到）
+                        </div>
+                        <div class="filter-bar">
+                            <input type="text" id="adapterPermFilter" placeholder="搜索工具…" style="width:auto;min-width:140px;flex:1;" />
+                        </div>
+                        <div id="adapterPermList" class="tool-grid"></div>
+                        <div class="btn-row" style="margin-top:16px;">
+                            <button class="btn" id="adapterPermSaveBtn">保存设置</button>
+                            <span id="adapterPermLoading" class="loading-text"></span>
+                        </div>
+                        <div id="adapterPermStatus" class="status"></div>
+                    </div>
+                </div>
+
                 <div class="sig">Wyccotccy &amp; 烬熵Cinder</div>
             </div>
         </div>
@@ -1491,6 +1565,14 @@
         <button class="tab" data-page="permission">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
             权限
+        </button>
+        <button class="tab" data-page="adapter">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7V3M15 7V3"/><path d="M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/></svg>
+            适配器
+        </button>
+        <button class="tab" data-page="adapterperm">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M10 10h4"/></svg>
+            适配权限
         </button>
     </nav>
 
@@ -1651,7 +1733,8 @@ if (!window.AstrBotPluginPage) {
         const PAGE_TITLES = {
             config: '配置', capability: '能力控制', workspace: '文件管理',
             takeover: '浏览器接管', memory: '记忆管理', schedule: '定时消息',
-            permission: '权限控制'
+            permission: '权限控制',
+            adapter: '工具适配器', adapterperm: '适配器权限控制'
         };
 
         function switchPage(page) {
@@ -1669,6 +1752,8 @@ if (!window.AstrBotPluginPage) {
             if (page === 'memory') { loadMemoryStats(); loadMemoryFilters(); loadMemories(); }
             if (page === 'schedule') loadSchedules();
             if (page === 'permission') loadPermission();
+            if (page === 'adapter') loadAdapter();
+            if (page === 'adapterperm') loadAdapterPerm();
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
@@ -2126,6 +2211,196 @@ if (!window.AstrBotPluginPage) {
                     '• 所有聊天数据对 LLM 完全可见';
             }
         }
+
+        // ==================== 工具适配器 ====================
+        let adapterItems = [];
+        let adapterKeyword = '';
+        let adapterPermConfig = {};
+        let adapterPermItems = [];
+        let adapterPermKeyword = '';
+
+        function showAdapterStatus(msg, type) {
+            const el = document.getElementById('adapterStatus');
+            el.textContent = msg;
+            el.className = `status show ${type}`;
+            setTimeout(() => el.classList.remove('show'), 3000);
+        }
+        function showAdapterPermStatus(msg, type) {
+            const el = document.getElementById('adapterPermStatus');
+            el.textContent = msg;
+            el.className = `status show ${type}`;
+            setTimeout(() => el.classList.remove('show'), 3000);
+        }
+
+        function adapterUpdateStat() {
+            const total = adapterItems.length;
+            const sel = adapterItems.filter(i => i.selected).length;
+            const reg = adapterItems.filter(i => i.registered).length;
+            const el = document.getElementById('adapterStat');
+            if (el) el.textContent = `共 ${total} 个命令 · 已勾选 ${sel} · 已注册 ${reg}`;
+        }
+
+        async function loadAdapter() {
+            const loading = document.getElementById('adapterLoading');
+            try {
+                loading.textContent = '枚举中...';
+                const res = await bridge.apiGet('adapter_list');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                adapterItems = res.items || [];
+                renderAdapterList();
+                adapterUpdateStat();
+                loading.textContent = '';
+            } catch (e) {
+                adapterItems = [];
+                renderAdapterList();
+                loading.textContent = '';
+                showAdapterStatus('加载失败: ' + e.message, 'error');
+            }
+        }
+
+        function renderAdapterList() {
+            const list = document.getElementById('adapterList');
+            const kw = adapterKeyword.trim().toLowerCase();
+            // 按来源插件分组，组内按命令名排序
+            const groups = {};
+            for (const it of adapterItems) {
+                if (kw && !(it.command.toLowerCase().includes(kw) ||
+                            it.plugin.toLowerCase().includes(kw) ||
+                            (it.desc || '').toLowerCase().includes(kw) ||
+                            it.tool_name.toLowerCase().includes(kw))) continue;
+                (groups[it.plugin] = groups[it.plugin] || []).push(it);
+            }
+            let html = '';
+            for (const plugin of Object.keys(groups).sort()) {
+                html += '<div class="cat-head">' + escapeHtml(plugin) + '（' + groups[plugin].length + '）</div>';
+                for (const it of groups[plugin].sort((a, b) => a.command.localeCompare(b.command))) {
+                    const badges = [];
+                    if (it.registered) badges.push('<span class="adp-badge ok">已注册</span>');
+                    else if (it.selected) badges.push('<span class="adp-badge warn">源命令缺失</span>');
+                    if (it.perm_default === 'admin') badges.push('<span class="adp-badge warn">超管</span>');
+                    if (it.params_mode === 'typed') badges.push('<span class="adp-badge">带参指令</span>');
+                    html += '<div class="tool-item adp-item">';
+                    html += '<div class="adp-row">';
+                    html += '<input type="checkbox" id="adpsel_' + escapeHtml(it.tool_name) + '"' + (it.selected ? ' checked' : '') + ' />';
+                    html += '<span class="adp-name" title="/' + escapeHtml(it.complete_names.join(' /')) + '">/' + escapeHtml(it.command) + '</span>';
+                    html += badges.join('');
+                    html += '</div>';
+                    if (it.desc) html += '<div class="adp-desc">' + escapeHtml(it.desc) + '</div>';
+                    html += '<div class="adp-toolname">' + escapeHtml(it.tool_name) + '</div>';
+                    html += '</div>';
+                }
+            }
+            list.innerHTML = html || '<div class="empty" style="grid-column:1/-1">没有可桥接的命令（试试「刷新枚举」）</div>';
+            // 勾选状态即时同步到内存，保存时统一提交
+            for (const it of adapterItems) {
+                const cb = document.getElementById('adpsel_' + it.tool_name);
+                if (cb) cb.addEventListener('change', () => { it.selected = cb.checked; adapterUpdateStat(); });
+            }
+        }
+
+        document.getElementById('adapterFilter').addEventListener('input', e => {
+            adapterKeyword = e.target.value;
+            renderAdapterList();
+        });
+        document.getElementById('adapterRefreshBtn').addEventListener('click', loadAdapter);
+
+        document.getElementById('adapterSaveBtn').addEventListener('click', async () => {
+            const loading = document.getElementById('adapterLoading');
+            const btn = document.getElementById('adapterSaveBtn');
+            loading.textContent = '保存中...';
+            btn.disabled = true;
+            try {
+                const selected = adapterItems.filter(i => i.selected).map(i => i.tool_name);
+                const res = await bridge.apiPost('adapter_save', { selected });
+                if (!res.success) throw new Error(res.error || '保存失败');
+                showAdapterStatus(`已保存：勾选 ${res.selected_count} 个，实际注册 ${res.registered_count} 个` +
+                    (res.skipped ? `（跳过 ${res.skipped} 个无效项）` : ''), 'success');
+                await loadAdapter();
+            } catch (e) {
+                showAdapterStatus(e.message, 'error');
+            } finally {
+                loading.textContent = '';
+                btn.disabled = false;
+            }
+        });
+
+        // ==================== 适配器权限控制 ====================
+        async function loadAdapterPerm() {
+            const loading = document.getElementById('adapterPermLoading');
+            try {
+                loading.textContent = '加载中...';
+                const [listRes, cfgRes] = await Promise.all([
+                    bridge.apiGet('adapter_list'),
+                    bridge.apiGet('get_config')
+                ]);
+                if (!listRes.success) throw new Error(listRes.error || '枚举失败');
+                if (!cfgRes.success) throw new Error(cfgRes.error || '配置加载失败');
+                adapterPermItems = (listRes.items || []).filter(i => i.registered);
+                adapterPermConfig = cfgRes.config || {};
+                renderAdapterPermList();
+                loading.textContent = '';
+            } catch (e) {
+                adapterPermItems = [];
+                renderAdapterPermList();
+                loading.textContent = '';
+                showAdapterPermStatus('加载失败: ' + e.message, 'error');
+            }
+        }
+
+        function renderAdapterPermList() {
+            const list = document.getElementById('adapterPermList');
+            const kw = adapterPermKeyword.trim().toLowerCase();
+            const visible = adapterPermItems.filter(i => {
+                if (!kw) return true;
+                return i.tool_name.toLowerCase().includes(kw) ||
+                       i.command.toLowerCase().includes(kw) ||
+                       i.plugin.toLowerCase().includes(kw) ||
+                       (i.desc || '').toLowerCase().includes(kw);
+            });
+            let html = '';
+            for (const it of visible) {
+                // 展示"生效档位"（含超管默认档回退），保存时以显式选择覆盖
+                const perm = it.perm_effective || 'global';
+                html += '<div class="tool-item">';
+                html += '<span class="label" title="' + escapeHtml(it.tool_name) + '">/' + escapeHtml(it.command) + '（' + escapeHtml(it.plugin) + '）</span>';
+                html += '<select id="adpperm_' + escapeHtml(it.tool_name) + '">';
+                for (const [lv, lb] of Object.entries(PERM_LABELS)) {
+                    html += '<option value="' + lv + '"' + (perm === lv ? ' selected' : '') + '>' + lb + '</option>';
+                }
+                html += '</select></div>';
+            }
+            list.innerHTML = html || '<div class="empty" style="grid-column:1/-1">还没有已启用的适配器工具（先到「工具适配器」勾选）</div>';
+        }
+
+        document.getElementById('adapterPermFilter').addEventListener('input', e => {
+            adapterPermKeyword = e.target.value;
+            renderAdapterPermList();
+        });
+
+        document.getElementById('adapterPermSaveBtn').addEventListener('click', async () => {
+            const loading = document.getElementById('adapterPermLoading');
+            const btn = document.getElementById('adapterPermSaveBtn');
+            loading.textContent = '保存中...';
+            btn.disabled = true;
+            try {
+                // 与既有权限表合并提交，避免覆盖 109 个自有工具的设置
+                const permissions = Object.assign({}, adapterPermConfig.tool_permissions || {});
+                for (const it of adapterPermItems) {
+                    const el = document.getElementById('adpperm_' + it.tool_name);
+                    if (el) permissions[it.tool_name] = el.value;
+                }
+                const res = await bridge.apiPost('save_config', { config: { tool_permissions: permissions } });
+                if (!res.success) throw new Error(res.error || '保存失败');
+                adapterPermConfig.tool_permissions = permissions;
+                showAdapterPermStatus('适配器权限已保存', 'success');
+                await loadAdapterPerm();
+            } catch (e) {
+                showAdapterPermStatus(e.message, 'error');
+            } finally {
+                loading.textContent = '';
+                btn.disabled = false;
+            }
+        });
 
         async function loadPermission() {
             try {

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import copy
+import functools
 import hashlib
 import inspect
 import json
@@ -165,6 +167,18 @@ PERMISSION_LABELS = {
     "admin": "超管",
     "disabled": "禁用",
 }
+
+# ======================================================
+# 工具适配器（v5.7.0）：把 AstrBot 全生态的 @filter.command 命令
+# 桥接为 wyc-tools 里的 AI 可调用工具
+# - 工具名固定前缀，与插件自有 109 个工具天然隔离
+# - 勾选状态持久化于 data_dir/adapter_tools.json（独立文件，
+#   避免动态键被 AstrBot 配置完整性检查清空，同 tool_permissions 的教训）
+# ======================================================
+ADAPTER_TOOL_PREFIX = "Wyc_assistive_tool_"
+# 单个工具名的最大长度：OpenAI / Anthropic / Gemini 的 function calling
+# 均要求工具名匹配 ^[a-zA-Z0-9_-]+$ 且 ≤64 字符，超长会被 provider 直接 400
+ADAPTER_TOOL_NAME_MAX = 64
 
 
 def _normalize_ip_literal(hostname: str) -> Optional[str]:
@@ -1277,6 +1291,12 @@ class Main(Star):
         self._tool_permissions = self._load_tool_permissions()
         # 所有工具的 enable_* 开关集合（用于 WebUI 保存白名单，避免开关被丢弃）
         self._tool_enable_keys = {f"enable_{name}" for name in self._tool_registry}
+        # 工具适配器：按勾选状态注册命令工具（此时后加载的插件尚未注册，
+        # 其命令需在 WebUI 点「刷新枚举」或保存勾选后才会出现）
+        try:
+            self._rebuild_adapter_tools()
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 工具适配器初始化失败: {_safe_error_msg(e)}")
         self.enable_human_typing = self.config.get("enable_human_typing", False)
         self.typing_idle_threshold = self.config.get("typing_idle_threshold", 900)
         self.typing_initial_delay_min = self.config.get("typing_initial_delay_min", 5)
@@ -1387,6 +1407,11 @@ class Main(Star):
                 return perm
         if name in SENSITIVE_TOOLS:
             return "admin"
+        # 适配器工具：枚举时探测到源命令带 ADMIN 权限装饰器 → 默认 admin 档
+        if name.startswith(ADAPTER_TOOL_PREFIX):
+            meta = self._tool_registry.get(name)
+            if isinstance(meta, dict) and meta.get("perm_default") == "admin":
+                return "admin"
         return "global"
 
     def _permissions_file(self) -> str:
@@ -1469,6 +1494,547 @@ class Main(Star):
         except Exception as e:
             logger.error(f"[QZoneTools] 写入 tool_permissions.json 失败: {_safe_error_msg(e)}")
             return False
+
+    # ==================== 工具适配器（v5.7.0） ====================
+    # ⚠️ 核心内部 API：本节依赖 AstrBot 框架内部结构
+    #（star_handlers_registry / StarHandlerMetadata / CommandFilter / star_map），
+    # 无稳定性承诺，AstrBot 升级后可能需要适配。
+    # 所有字段访问均为防御式 getattr，框架变更时表现为"枚举为空/跳过该条"而非崩溃。
+
+    @staticmethod
+    def _adapter_cmd_to_ascii(cmd: str) -> str:
+        """把命令名转成可作工具名的 ASCII 串。
+
+        纯 ASCII 直接规范化；含中文等非 ASCII 字符时优先用 pypinyin 转拼音
+        （如 发说说 -> fa_shuo_shuo），依赖缺失时退化为 md5 短码（保证唯一性，
+        可读性差但功能不受影响，中文原名始终写在工具描述里供搜索命中）。
+        """
+        import hashlib as _hashlib
+        import re as _re
+
+        if not cmd:
+            return "cmd"
+        if all(ord(c) < 128 for c in cmd):
+            s = _re.sub(r"[^a-zA-Z0-9]+", "_", cmd).strip("_").lower()
+            return s or "cmd"
+        try:
+            from pypinyin import lazy_pinyin
+
+            py = "_".join(lazy_pinyin(cmd))
+            py = _re.sub(r"[^a-zA-Z0-9]+", "_", py).strip("_").lower()
+            if py:
+                return py
+        except Exception:
+            pass
+        return "c" + _hashlib.md5(cmd.encode("utf-8")).hexdigest()[:6]
+
+    @classmethod
+    def _adapter_build_tool_name(cls, plugin_short: str, command: str) -> str:
+        """生成 Wyc_assistive_tool_<插件名>_<工具名>，保证 ≤64 字符且合法。"""
+        import hashlib as _hashlib
+        import re as _re
+
+        raw = f"{ADAPTER_TOOL_PREFIX}{plugin_short}_{cls._adapter_cmd_to_ascii(command)}"
+        raw = _re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+        if len(raw) <= ADAPTER_TOOL_NAME_MAX:
+            return raw
+        # 超长：截断后追加 4 位 md5 保证唯一（截断可能撞名）
+        suffix = _hashlib.md5(raw.encode("utf-8")).hexdigest()[:4]
+        return raw[: ADAPTER_TOOL_NAME_MAX - 5].rstrip("_") + "_" + suffix
+
+    def _adapter_file(self) -> str:
+        return os.path.join(self.data_dir, "adapter_tools.json")
+
+    def _load_adapter_selection(self) -> Dict[str, dict]:
+        """载入已勾选的命令工具 {tool_name: {command, plugin, added_at}}。"""
+        path = self._adapter_file()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            sel = data.get("selected", {})
+            return {k: v for k, v in sel.items() if isinstance(v, dict)} if isinstance(sel, dict) else {}
+        except Exception as e:
+            logger.error(f"[QZoneTools] 读取 adapter_tools.json 失败: {_safe_error_msg(e)}")
+            return {}
+
+    def _save_adapter_selection(self, selected: Dict[str, dict]) -> bool:
+        """原子写入勾选状态（tmp + fsync + replace，同 tool_permissions 模式）。"""
+        path = self._adapter_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"selected": selected}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True
+        except Exception as e:
+            logger.error(f"[QZoneTools] 写入 adapter_tools.json 失败: {_safe_error_msg(e)}")
+            return False
+
+    def _enumerate_adapter_commands(self) -> list:
+        """枚举 AstrBot 全部已加载插件注册的 @filter.command 命令（排除本插件）。
+
+        返回 list[dict]：
+          tool_name / command / complete_names / plugin / plugin_full /
+          desc / usage / params_mode("typed"|"raw") / params_schema / perm_default
+
+        ⚠️ 依赖框架内部 API（见节首注释），单条解析失败跳过该条，绝不抛出。
+        """
+        items: list = []
+        try:
+            from astrbot.core.star.star_handler import star_handlers_registry, EventType
+            from astrbot.core.star.filter.command import CommandFilter
+            from astrbot.core.star.star import star_map
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 工具适配器：框架内部 API 导入失败（AstrBot 版本变更？）: {_safe_error_msg(e)}")
+            return items
+        try:
+            from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
+        except Exception:
+            PermissionType = PermissionTypeFilter = None  # 权限探测降级为"默认 admin"
+
+        own_module = self.__class__.__module__  # 本插件模块路径，用于排除自身命令
+        seen_pairs = set()
+        try:
+            handlers = star_handlers_registry.get_handlers_by_event_type(
+                EventType.AdapterMessageEvent, only_activated=True
+            )
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 工具适配器：枚举 handler 失败: {_safe_error_msg(e)}")
+            return items
+
+        for md in handlers:
+            try:
+                module_path = getattr(md, "handler_module_path", "") or ""
+                # ---------- 排除本插件自己的命令 ----------
+                # 一级判定：handler 实例身份。框架加载时把 handler 包成
+                #   functools.partial(原始函数, star_cls实例)
+                # 因此若 args[0] 是本插件实例，即为自身命令（最可靠，不依赖模块路径格式）
+                try:
+                    h0 = getattr(md, "handler", None)
+                    own_inst = None
+                    if isinstance(h0, functools.partial) and h0.args:
+                        own_inst = h0.args[0]
+                    elif inspect.ismethod(h0):
+                        own_inst = getattr(h0, "__self__", None)
+                    if own_inst is not None and isinstance(own_inst, self.__class__):
+                        continue
+                except Exception:
+                    pass
+                # 二级判定：模块路径包含本插件名 / 与本类模块一致
+                if (not module_path
+                        or module_path == own_module
+                        or (PLUGIN_NAME and PLUGIN_NAME in module_path)):
+                    continue
+                # 来源插件（star_map 是框架官方的 模块路径→插件元数据 映射）
+                plugin_full = module_path
+                plugin_short = ""
+                try:
+                    sm = star_map.get(module_path) if hasattr(star_map, "get") else None
+                    if sm is not None:
+                        plugin_full = getattr(sm, "name", None) or plugin_full
+                        plugin_short = plugin_full
+                except Exception:
+                    pass
+                if not plugin_short:
+                    # 兜底：取模块路径末段
+                    plugin_short = module_path.rsplit(".", 1)[-1]
+                # 剥掉市场通用前缀，缩短工具名（astrbot_plugin_broadcast -> broadcast）
+                ps = plugin_short
+                for pre in ("astrbot_plugin_", "astrbot_plugin"):
+                    if ps.startswith(pre):
+                        ps = ps[len(pre):]
+                        break
+                ps = re.sub(r"[^a-zA-Z0-9_]", "_", ps).strip("_") or "plugin"
+
+                for f in getattr(md, "event_filters", None) or []:
+                    if not isinstance(f, CommandFilter):
+                        continue
+                    try:
+                        command = getattr(f, "command_name", None)
+                        if not command:
+                            continue
+                        pair = (plugin_full, command)
+                        if pair in seen_pairs:
+                            continue
+                        seen_pairs.add(pair)
+
+                        complete_names = []
+                        try:
+                            complete_names = list(f.get_complete_command_names())
+                        except Exception:
+                            complete_names = [command]
+
+                        # 描述：框架注册时已取 handler.__doc__.strip() 存入 md.desc
+                        desc = ""
+                        try:
+                            desc = (getattr(md, "desc", "") or "").strip().split("\n")[0]
+                        except Exception:
+                            pass
+
+                        # 参数模式：typed = 框架带参指令（handler_params 非空）；
+                        # raw = 命令自己在 handler 里 split(message_str)（本插件 51 个命令即此类）
+                        params_mode = "raw"
+                        params_schema = {
+                            "type": "object",
+                            "properties": {
+                                "args": {"type": "string",
+                                         "description": "命令参数，空格分隔（不含命令本身）。无参数则传空字符串"}
+                            },
+                            "required": [],
+                        }
+                        usage = ""
+                        try:
+                            handler_params = getattr(f, "handler_params", None)
+                            if handler_params:
+                                params_mode = "typed"
+                                props = {}
+                                required = []
+                                for pname, ptype in handler_params.items():
+                                    is_greedy = bool(ptype is not None and "GreedyStr" in str(ptype))
+                                    if isinstance(ptype, type):
+                                        if ptype is bool:
+                                            jt, jd = "boolean", "布尔值"
+                                        elif ptype is int:
+                                            jt, jd = "integer", "整数"
+                                        elif ptype is float:
+                                            jt, jd = "number", "数字"
+                                        else:
+                                            jt, jd = "string", "字符串"
+                                    else:
+                                        jt, jd = "string", "字符串"
+                                    if is_greedy:
+                                        jd = "字符串（贪婪匹配，接收剩余全部参数）"
+                                    props[pname] = {"type": jt, "description": jd}
+                                    # 有默认值的参数（非 type）视为可选
+                                    if isinstance(ptype, type):
+                                        required.append(pname)
+                                if props:
+                                    params_schema = {
+                                        "type": "object",
+                                        "properties": props,
+                                        "required": required,
+                                    }
+                                try:
+                                    usage = str(f.print_types())
+                                except Exception:
+                                    usage = ", ".join(handler_params.keys())
+                        except Exception:
+                            params_mode = "raw"
+
+                        # 权限探测：event_filters 里的 PermissionTypeFilter(ADMIN)
+                        # 说明原命令有人工管理员门槛 → 适配后的工具默认同样 admin 档
+                        perm_default = "global"
+                        if PermissionTypeFilter is not None:
+                            try:
+                                for ef in getattr(md, "event_filters", None) or []:
+                                    if isinstance(ef, PermissionTypeFilter):
+                                        pt = getattr(ef, "permission_type", None)
+                                        if pt is not None and pt == getattr(PermissionType, "ADMIN", None):
+                                            perm_default = "admin"
+                            except Exception:
+                                pass
+
+                        tool_name = self._adapter_build_tool_name(ps, command)
+                        # 命名冲突兜底（不同插件剥前缀后同名 / 同名命令）：追加 4 位区分码
+                        if any(it["tool_name"] == tool_name for it in items):
+                            import hashlib as _h
+                            tool_name = f"{tool_name[:ADAPTER_TOOL_NAME_MAX - 5].rstrip('_')}_{_h.md5(f'{ps}|{command}'.encode()).hexdigest()[:4]}"
+
+                        items.append({
+                            "tool_name": tool_name,
+                            "command": command,
+                            "complete_names": complete_names,
+                            "plugin": ps,
+                            "plugin_full": plugin_full,
+                            "module_path": module_path,
+                            "desc": desc,
+                            "usage": usage,
+                            "params_mode": params_mode,
+                            "params_schema": params_schema,
+                            "perm_default": perm_default,
+                        })
+                    except Exception:
+                        continue  # 单条命令解析失败不影响其余
+            except Exception:
+                continue  # 单个 handler 解析失败不影响其余
+        return items
+
+    def _rebuild_adapter_tools(self) -> int:
+        """按勾选状态重建 _tool_registry 里的适配器工具（幂等，先清后建）。
+
+        返回成功注册的数量。找不到源命令（插件被卸载/重命名）的条目跳过并记日志。
+        """
+        # 先清掉旧的全部适配器条目，防止重载/重复注册
+        for name in [n for n in self._tool_registry if n.startswith(ADAPTER_TOOL_PREFIX)]:
+            self._tool_registry.pop(name, None)
+            self._tool_enable_keys.discard(f"enable_{name}")
+
+        selected = self._load_adapter_selection()
+        if not selected:
+            return 0
+        enum_items = {it["tool_name"]: it for it in self._enumerate_adapter_commands()}
+        count = 0
+        for tool_name in selected:
+            if not tool_name.startswith(ADAPTER_TOOL_PREFIX):
+                continue
+            it = enum_items.get(tool_name)
+            if it is None:
+                logger.warning(f"[QZoneTools] 适配器工具 {tool_name} 的源命令已不存在（插件卸载或改名），跳过")
+                continue
+            try:
+                handler = self._adapter_resolve_handler(it["module_path"], it["command"])
+                if handler is None:
+                    continue
+                desc_text = it["desc"] or "AstrBot 命令"
+                description = (
+                    f"AstrBot 命令 /{it['command']}（来源插件 {it['plugin']}）：{desc_text}。"
+                    f"参数请按命令要求提供。"
+                )
+                self._tool_registry[tool_name] = {
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": it["params_schema"],
+                    "keywords": [it["command"], it["plugin"], "命令", "适配器"],
+                    "handler": handler,
+                    "is_command": True,
+                    "command_name": it["command"],
+                    "params_mode": it["params_mode"],
+                    "perm_default": it["perm_default"],
+                }
+                self._tool_enable_keys.add(f"enable_{tool_name}")
+                count += 1
+            except Exception as e:
+                logger.warning(f"[QZoneTools] 注册适配器工具 {tool_name} 失败: {_safe_error_msg(e)}")
+        if count:
+            logger.info(f"[QZoneTools] 工具适配器：已注册 {count} 个命令工具")
+        return count
+
+    def _adapter_find_handler_meta(self, module_path: str, command: str, handler=None):
+        """按模块路径 + 命令名定位源命令的 (handler, CommandFilter)。
+
+        框架在插件加载时已把 registry 里的 handler 重绑为
+        `functools.partial(原始函数, 插件实例)`（见 star_manager 的
+        "Restore decorator-registered callables before binding" 段），
+        因此直接取用即可，无需自己 __get__ 绑定。
+        handler 参数非空时，额外校验 h is handler（用于按对象精确匹配）。
+        """
+        try:
+            from astrbot.core.star.star_handler import star_handlers_registry, EventType
+            from astrbot.core.star.filter.command import CommandFilter
+
+            for md in star_handlers_registry.get_handlers_by_event_type(EventType.AdapterMessageEvent, True):
+                try:
+                    if (getattr(md, "handler_module_path", "") or "") != module_path:
+                        continue
+                    h = getattr(md, "handler", None)
+                    if handler is not None and h is not handler:
+                        continue
+                    for f in getattr(md, "event_filters", None) or []:
+                        if isinstance(f, CommandFilter) and getattr(f, "command_name", None) == command:
+                            return h, f
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 解析命令 {command} 的 handler 失败: {_safe_error_msg(e)}")
+        return None, None
+
+    def _adapter_resolve_handler(self, module_path: str, command: str):
+        """返回指定命令的可调用 handler（框架已绑实例）。"""
+        h, _ = self._adapter_find_handler_meta(module_path, command)
+        return h
+
+    @staticmethod
+    def _adapter_framework_timeout() -> int:
+        """读取框架的 tool_call_timeout（读不到时回落 120）。
+
+        来源：astrbot.core.config.agent_runner.AGENT_RUNNER_CONFIG_DEFAULTS
+        的 local.misc.tool_call_timeout。
+        """
+        try:
+            from astrbot.core.config.agent_runner import AGENT_RUNNER_CONFIG_DEFAULTS
+
+            misc = (AGENT_RUNNER_CONFIG_DEFAULTS.get("local") or {}).get("misc") or {}
+            return int(misc.get("tool_call_timeout", 120) or 120)
+        except Exception:
+            return 120
+
+    async def _execute_adapter_command(self, event: AstrMessageEvent, tool_name: str, args_dict: dict) -> dict:
+        """执行适配器命令工具（run_wyc_tool 的命令分支）。
+
+        机制（全部经容器内框架源码验证）：
+        - 复用当前对话的真实 event（平台子类，send/get_sender_id 均可用），
+          `copy.copy` 出影子事件后改写 message_str；
+        - ⚠️ 命令收到的 message_str **不含** wake_prefix（"/" 在 WakingCheckStage
+          已被剥掉，CommandFilter 也按 startswith(裸命令名) 判定），拼接时不加斜杠；
+        - typed 模式（框架带参指令）：按参数表拍平后复用框架自带的
+          CommandFilter.validate_and_convert_params 做类型转换，再以 kwargs 传入；
+        - raw 模式（命令自行 split message_str）：把 args 字符串拼在命令名之后；
+        - 两种 handler 形态都消费：异步生成器（逐个 yield）与普通协程。
+        """
+        meta = self._tool_registry.get(tool_name) or {}
+        command = str(meta.get("command_name") or "").strip()
+        if not command:
+            return {"status": "error", "message": f"适配器工具 {tool_name} 缺少命令信息，请重新保存勾选。"}
+        is_typed = meta.get("params_mode") == "typed"
+        # 模块路径需从枚举结果反查（registry 条目只存了 command_name）
+        module_path = ""
+        try:
+            for it in self._enumerate_adapter_commands():
+                if it["tool_name"] == tool_name:
+                    module_path = it["module_path"]
+                    break
+        except Exception:
+            pass
+        source_handler, source_filter = self._adapter_find_handler_meta(module_path, command) if module_path else (None, None)
+        if source_handler is None:
+            return {"status": "error", "message": f"命令 /{command} 的源插件处理器不可用（可能已卸载或改名）。"}
+
+        # ---------- 组装参数 ----------
+        param_kwargs = {}
+        raw_args = ""
+        if is_typed:
+            for k, v in (args_dict or {}).items():
+                if k == "command":
+                    continue
+                param_kwargs[k] = v
+            # 复用框架的校验/转换（校验必填、做 int/bool/GreedyStr 转换）
+            try:
+                handler_params = getattr(source_filter, "handler_params", None) if source_filter is not None else None
+                if handler_params:
+                    flat = []
+                    for pname in handler_params:
+                        if pname in param_kwargs and param_kwargs[pname] not in (None, ""):
+                            flat.append(str(param_kwargs[pname]))
+                    if flat:
+                        param_kwargs = source_filter.validate_and_convert_params(flat, handler_params)
+            except ValueError as e:
+                return {"status": "error", "message": f"参数错误：{e}"}
+            except Exception:
+                pass  # 转换异常则用原值，让命令自行兜底
+        else:
+            raw_args = str((args_dict or {}).get("args", "") or "").strip()
+
+        # ---------- 影子事件 ----------
+        try:
+            new_ev = copy.copy(event)
+        except Exception as e:
+            return {"status": "error", "message": f"无法创建命令执行上下文: {_safe_error_msg(e)}"}
+        # 注意：不加 "/" —— 框架内命令文本不含 wake_prefix
+        new_ev.message_str = f"{command} {raw_args}".strip() if raw_args else str(command)
+        # 影子事件绕过了 WakingCheckStage，需手动置位命令判定所需标志
+        for attr in ("is_at_or_wake_command", "is_wake"):
+            try:
+                setattr(new_ev, attr, True)
+            except Exception:
+                pass
+        try:
+            new_ev.clear_result()
+        except Exception:
+            pass
+        # 捕获命令通过 event.send() 直接发出的文本（部分命令不 return 而是 send）
+        captured = []
+        # 捕获生成器 yield 出的纯文本（非 MessageEventResult 的情况）
+        yield_texts = []
+
+        # 执行前预校验签名：避免"跑一半再抛 TypeError"导致命令重复执行
+        call_kwargs = dict(param_kwargs)
+        if call_kwargs:
+            try:
+                # functools.partial 需先看底层函数签名（已绑定 self 的不再计 self）
+                raw_fn = source_handler
+                while isinstance(raw_fn, functools.partial):
+                    raw_fn = raw_fn.func
+                sig = inspect.signature(raw_fn)
+                accepted = set(sig.parameters.keys())
+                # 绑定实例的 partial 会把 self 作为第一个 positional 占位（param name 'self'）
+                call_kwargs = {k: v for k, v in call_kwargs.items() if k in accepted}
+                if not call_kwargs:
+                    logger.info(
+                        f"[QZoneTools] 命令 /{command} 的 handler 不接受参数表里的键，"
+                        "退回仅传 event 执行（命令自行解析 message_str）"
+                    )
+            except (TypeError, ValueError):
+                pass
+
+        async def _run():
+            try:
+                orig_send = new_ev.send
+
+                async def _patched_send(message_chain, *a, **kw):
+                    try:
+                        if hasattr(message_chain, "get_plain_text"):
+                            t = message_chain.get_plain_text(with_other_comps_mark=True)
+                            if t and t.strip():
+                                captured.append(t.strip())
+                        else:
+                            s = str(message_chain).strip()
+                            if s:
+                                captured.append(s)
+                    except Exception:
+                        pass
+                    return await orig_send(message_chain, *a, **kw)
+
+                new_ev.send = _patched_send
+            except Exception:
+                pass  # 捕获失败不影响执行
+
+            ret = source_handler(new_ev, **call_kwargs)
+            if inspect.isasyncgen(ret):
+                # 与框架 call_handler 同语义：逐个消费 yield，
+                # 遇到 MessageEventResult/CommandResult 即 set_result（否则命令输出会丢失）
+                try:
+                    from astrbot.core.message.message_event_result import (
+                        CommandResult, MessageEventResult,
+                    )
+
+                    _result_types = (MessageEventResult, CommandResult)
+                except Exception:
+                    _result_types = ()
+                async for item in ret:
+                    try:
+                        if _result_types and isinstance(item, _result_types):
+                            new_ev.set_result(item)
+                        elif isinstance(item, str) and item.strip():
+                            yield_texts.append(item.strip())
+                    except Exception:
+                        pass
+            elif inspect.isawaitable(ret):
+                await ret
+
+        try:
+            fw_timeout = self._adapter_framework_timeout()
+            eff = max(5, fw_timeout - 12)
+            await asyncio.wait_for(_run(), timeout=eff)
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": f"⏱️ 命令 /{command} 执行超时（超过 {eff} 秒），已中止。"}
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[QZoneTools] 执行适配器命令 /{command} 失败: {_safe_error_msg(e)}", exc_info=True)
+            return {"status": "error", "message": f"命令 /{command} 执行失败: {_safe_error_msg(e)}"}
+
+        # ---------- 收集结果 ----------
+        texts = list(captured) + list(yield_texts)
+        try:
+            res = new_ev.get_result()
+            if res is not None:
+                t = res.get_plain_text(with_other_comps_mark=True)
+                if t and t.strip():
+                    texts.append(t.strip())
+        except Exception:
+            pass
+        msg = "\n".join(dict.fromkeys(t for t in texts if t)) if texts else ""
+        if not msg:
+            msg = "该命令未返回文本结果（若已生效请忽略本提示）"
+        return {
+            "status": "success",
+            "message": f"✅ 命令 /{command} 执行结果：\n{msg}",
+        }
 
     def _get_available_tools(self, event: AstrMessageEvent = None) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
@@ -3673,7 +4239,10 @@ class Main(Star):
             # 防御：若某个 handler 误写成 async generator，直接 await 会抛
             # TypeError: object async_generator can't be used in 'await' expression。
             # 这里主动探测并给出可诊断的错误，而不是抛到底层。
-            if inspect.isasyncgenfunction(handler):
+            if available_tools[tool_name].get("is_command"):
+                # 适配器命令工具：走专用执行路径（影子事件 + 消费生成器/协程）
+                result = await self._execute_adapter_command(event, tool_name, args_dict)
+            elif inspect.isasyncgenfunction(handler):
                 logger.error(
                     f"[run_wyc_tool] 工具 {tool_name} 的 handler 是 async generator，"
                     "本插件只支持普通协程；请改为普通 async def + return。"
@@ -3682,7 +4251,8 @@ class Main(Star):
                     "status": "error",
                     "message": f"工具 {tool_name} 实现方式不受支持（async generator），请联系插件作者。",
                 }
-            result = await handler(event, **args_dict)
+            else:
+                result = await handler(event, **args_dict)
             # 隐私模式下对返回文本脱敏（隐藏群号/QQ号）
             result = self._privacy_filter_result(result)
             # 浏览器操作增强显示：叠加操作图标 + 按需把截图推送给用户（纯代码实现）
@@ -4187,6 +4757,8 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/workspace_file_content", self.handle_workspace_file_content, ["GET"], "获取工作区文件内容")
             self.context.register_web_api(f"/{PLUGIN_NAME}/workspace_delete_file", self.handle_workspace_delete_file, ["POST"], "删除工作区文件")
             self.context.register_web_api(f"/{PLUGIN_NAME}/workspace_upload_file", self.handle_workspace_upload_file, ["POST"], "上传文件到工作区")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/adapter_list", self.handle_adapter_list, ["GET"], "枚举可桥接命令工具")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/adapter_save", self.handle_adapter_save, ["POST"], "保存适配器勾选")
             logger.info("[QZoneTools] WebUI API 已注册")
         except Exception as e:
             logger.error(f"[QZoneTools] 注册失败: {e}")
@@ -4209,6 +4781,72 @@ class Main(Star):
         effective_perms.update(self._tool_permissions)  # 显式配置优先展示
         safe["tool_permissions"] = effective_perms
         return jsonify({"success": True, "config": safe})
+
+    async def handle_adapter_list(self):
+        """枚举全部可桥接命令 + 当前勾选/注册状态（每次调用都实时枚举并重建注册表）。"""
+        try:
+            items = self._enumerate_adapter_commands()
+            selected = self._load_adapter_selection()
+            self._rebuild_adapter_tools()  # 幂等：让刚安装插件的命令立即可勾选/生效
+            out = []
+            for it in items:
+                tn = it["tool_name"]
+                out.append({
+                    "tool_name": tn,
+                    "command": it["command"],
+                    "complete_names": it["complete_names"],
+                    "plugin": it["plugin"],
+                    "plugin_full": it["plugin_full"],
+                    "desc": it["desc"],
+                    "usage": it["usage"],
+                    "params_mode": it["params_mode"],
+                    "perm_default": it["perm_default"],
+                    "perm_effective": self._get_tool_permission(tn),
+                    "selected": tn in selected,
+                    "registered": tn in self._tool_registry,
+                })
+            reg_count = sum(1 for n in self._tool_registry if n.startswith(ADAPTER_TOOL_PREFIX))
+            return jsonify({"success": True, "items": out, "registered_count": reg_count})
+        except Exception as e:
+            logger.error(f"[WebUI] 枚举适配器命令失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_adapter_save(self):
+        """保存勾选并重建注册表。仅接受真实枚举到的命令，防止伪造条目写入。"""
+        try:
+            data = await request.get_json()
+            sel_list = data.get("selected", []) if isinstance(data, dict) else None
+            if not isinstance(sel_list, list):
+                return jsonify({"success": False, "error": "格式错误：selected 必须是数组"})
+            enum_items = {it["tool_name"]: it for it in self._enumerate_adapter_commands()}
+            selected = {}
+            skipped = 0
+            for tn in sel_list:
+                if not isinstance(tn, str) or not tn.startswith(ADAPTER_TOOL_PREFIX):
+                    skipped += 1
+                    continue
+                it = enum_items.get(tn)
+                if it is None:
+                    logger.warning(f"[WebUI] 忽略未知的适配器工具: {tn}")
+                    skipped += 1
+                    continue
+                selected[tn] = {
+                    "command": it["command"],
+                    "plugin": it["plugin_full"],
+                    "added_at": int(time.time()),
+                }
+            if not self._save_adapter_selection(selected):
+                return jsonify({"success": False, "error": "写入 adapter_tools.json 失败，请查看日志"})
+            registered = self._rebuild_adapter_tools()
+            return jsonify({
+                "success": True,
+                "selected_count": len(selected),
+                "registered_count": registered,
+                "skipped": skipped,
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 保存适配器勾选失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_save_config(self):
         try:

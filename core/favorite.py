@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from astrbot.api import logger
@@ -48,18 +49,27 @@ class FavoriteManager:
             self._favorites = {}
 
     def _save(self) -> None:
-        """持久化当前收藏数据"""
+        """持久化当前收藏数据（原子写：先写临时文件再替换，避免并发写损坏）"""
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self.file_path.open("w", encoding="utf-8") as f:
+            tmp_path = self.file_path.with_suffix(self.file_path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
                 json.dump(
                     self._favorites,
                     f,
                     ensure_ascii=False,
                     indent=2,
                 )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp_path), str(self.file_path))
         except Exception as e:
             logger.exception(f"写入 favorite.json 失败: {e}")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     # ─────────────────────────────
     # 查询接口（只读）
