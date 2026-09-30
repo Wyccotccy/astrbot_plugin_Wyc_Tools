@@ -1,4 +1,15 @@
-# QzoneTools · 更多LLM工具
+# Wyc Tools · 更多LLM工具
+
+> **关于仓库更名**
+>
+> 本仓库原名 **QzoneTools**（`astrbot_plugin_qzone_tools`），随着功能从 QQ 空间
+> 扩展到群管理、消息收发、记忆管理、浏览器自动化等全域工具集，现已更名为
+> **Wyc Tools**（`astrbot_plugin_Wyc_Tools`）。
+>
+> 为兼容老用户，插件内部标识（数据目录 `plugin_data/astrbot_plugin_qzone_tools/`、
+> WebUI API 路径等）仍沿用原插件名 `astrbot_plugin_qzone_tools` ——
+> **升级 / 重装不丢数据，无需手动迁移**。本文档历史更新日志中出现的
+> `qzone_tools` 均指本插件旧名。
 
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
@@ -48,7 +59,7 @@
 
 ### 方式一：插件市场（推荐）
 
-AstrBot WebUI → 插件市场 → 搜索 `Wyc_Tools` → 安装
+AstrBot WebUI → 插件市场 → 搜索 `Wyc_Tools`（原名 QzoneTools / `qzone_tools`）→ 安装
 
 ### 方式二：Git 克隆
 
@@ -434,7 +445,11 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-### v5.7.1 — 高危工具权限硬下限修复 + 补充搜索词
+### v5.7.1 — 仓库更名 + 高危工具权限硬下限修复 + 补充搜索词
+
+**🏷️ 仓库更名**：`astrbot_plugin_qzone_tools`（QzoneTools）→
+`astrbot_plugin_Wyc_Tools`（Wyc Tools）。GitHub 旧地址会自动跳转到新地址；
+插件内部标识与数据目录仍沿用旧名，升级无需任何迁移操作。
 
 **🔒 安全修复（严重）**：修复适配器高危工具（/ban、/kick、/退群 等源命令
 带超管门槛的 50 个）可在 WebUI 被降档为「全局」的漏洞——现 perm_default
@@ -610,7 +625,7 @@ AI 可调用的 wyc-tools 工具，WebUI 勾选即生效。
 - 配置项文案同步更正为「临时内容，不写入会话历史」
 
 ### v5.2.4 — 持久化数据迁出插件目录（市场上架合规）
-- 工作区 / 字体 / 收藏夹 / 刻度资源全部迁移到 `data/plugin_data/astrbot_plugin_qzone_tools/`
+- 工作区 / 字体 / 收藏夹 / 刻度资源全部迁移到 `data/plugin_data/astrbot_plugin_qzone_tools/`（旧插件名，现继续沿用）
 - 新增自动迁移逻辑，老用户升级不丢数据
 - `.gitignore` 补充运行时目录，`favorite.json` 移出版本控制
 
