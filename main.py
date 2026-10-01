@@ -1422,7 +1422,7 @@ class Main(Star):
     def _permissions_file(self) -> str:
         return os.path.join(self.data_dir, "tool_permissions.json")
 
-    # ==================== 补充搜索词（v5.7.1） ====================
+    # ==================== 补充搜索词（v5.7.5） ====================
     # 用户可为任意工具（含适配器工具）追加搜索关键词。
     # 独立文件存储，与内置 keywords 叠加生效，不改动 registry 里的原始数据。
 

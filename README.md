@@ -14,7 +14,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.7.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.7.5-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
