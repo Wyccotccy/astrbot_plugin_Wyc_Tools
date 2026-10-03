@@ -14,7 +14,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.7.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.8.2-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -27,6 +27,8 @@
 - [功能特性](#功能特性)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [QQ 空间发说说](#qq-空间发说说v580-支持带图)
+- [工具调优](#工具调优webui-可视化)
 - [浏览器自动化](#浏览器自动化)
 - [完整工具列表](#完整工具列表)
 - [配置说明](#配置说明)
@@ -40,7 +42,7 @@
 
 | 模块 | 能力 |
 |------|------|
-| 📝 **QQ空间** | 发表说说（自动获取最新 Cookie） |
+| 📝 **QQ空间** | 发表说说（纯文字或**带图片**，自动获取最新 Cookie） |
 | 💬 **消息** | 主动发消息、引用撤回、戳一戳、定时消息、高级定时指令（持久化） |
 | 👥 **群管理** | 禁言、踢人、全体禁言、改名片、群公告、群文件、管理员设置、群荣誉、加群方式、打卡等 25 项 |
 | 🎨 **个人资料** | 修改昵称/签名、设置 QQ 头像、设置群头像、点赞、自定义表情 |
@@ -50,6 +52,7 @@
 | 🌐 **浏览器自动化** | 坐标交互（点击/双击/右键/长按/拖拽/悬停/输入）、搜索、标签页、收藏夹、反风控伪装 |
 | 🧪 **工作区** | Python 代码执行（AST 沙箱）、文件读写、图片生成与发送 |
 | 🛡️ **权限控制** | 109 个工具逐一配置 `global/admin/disabled`，63 个敏感工具默认仅管理员可用 |
+| 🔎 **工具调优** | 为任意工具**补充搜索词**、自定义**返回文案**（WebUI 可视化编辑） |
 | 🔒 **隐私模式** | 群号/QQ号 SHA1 不可逆脱敏，LLM 看不到真实 ID |
 | ⚡ **稳定性** | 全部 NapCat API 带超时、异步无阻塞、后台任务防回收、浏览器空闲自动回收 |
 
@@ -107,10 +110,81 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 | 用户说 | LLM 调用链 |
 |--------|-----------|
 | "帮我发条说说，今天天气真好" | `search_wyc_tools("发说说")` → `run_wyc_tool("publish_qzone", {"content": "今天天气真好"})` |
+| "把这张图发到空间" | `run_wyc_tool("publish_qzone", {"content": "...", "images": ["chart.png"]})`（发图+说这句话即可，插件会自动取引用消息里的图） |
 | "找一下通知群" | `search_wyc_tools("搜索")` → `run_wyc_tool("search_contacts", {"keyword": "通知"})` |
 | "把捣乱的张三禁言 10 分钟" | `search_wyc_tools("禁言")` → `run_wyc_tool("set_group_ban", {...})` |
 | "记住我喜欢喝咖啡" | `search_wyc_tools("记忆")` → `run_wyc_tool("add_memory", {"content": "用户喜欢喝咖啡"})` |
 | "打开 B 站看看热搜" | `search_wyc_tools("浏览器")` → `run_wyc_tool("browser_visit", {"url": "..."})` |
+
+---
+
+## QQ 空间发说说（v5.8.0+ 支持带图）
+
+`publish_qzone` 支持**纯文字**或**带图片**发布，图片最多 9 张（空间上限）。
+
+| 参数 | 说明 |
+|------|------|
+| `content` | 说说文字 |
+| `images` | 图片列表（可选）：工作区文件名（如 `chart.png`）、绝对路径、或 http(s) 链接 |
+
+**图片从哪来**：
+
+1. AI 自己给 `images` 传路径 —— 例如刚生成的图表、截图
+2. **用户在消息里发了图**：AI 不传 `images` 时会自动取当前消息引用的图片，
+   所以「把这张图发到空间」直接说就行
+
+**实现要点**：图片先上传到空间（`cgi_upload_image`）拿到 `pic_bo`/`richval`，
+再随说说一起提交；纯文本发布路径保持不变，不受影响。
+图片 URL 走与 `fetch_url` 同一套 SSRF 校验，本地文件受工作区路径限制。
+
+**失败降级**：带图发表失败会自动改发纯文本（避免整条说说发不出去）；
+单张图读取失败只跳过该张并如实告知。
+
+### 定时带图发说说
+
+`create_scheduled_command` 的 `qzone_post` 类型同样支持 `images`：
+
+```json
+{"content": "晚安", "images": ["night.png"]}
+```
+
+图片在**执行时刻**才读取，因此可以引用届时才生成的产物。
+
+---
+
+## 工具调优（WebUI 可视化）
+
+插件有 100+ 个工具，WebUI 提供两个页面对它们做“微调”，无需改代码：
+
+| 页面 | 作用 | 存储 |
+|------|------|------|
+| **补充工具搜索词** | 给工具追加搜索关键词，提升 `search_wyc_tools` 命中率 | `data_dir/tool_keywords.json` |
+| **工具返回文案** | 给工具追加一段返回给 AI 的说明 | `data_dir/tool_result_notes.json` |
+
+两者均为**独立文件 + 原子写**，避开 AstrBot 配置完整性检查对动态键的清理；
+对内置工具与适配器工具都生效。
+
+### 返回文案的语义（重要）
+
+返回文案是**追加、不覆盖**：系统真实结果原样保留，自定义文案追加在末尾。
+这样 AI 既能看到真实成败，又能执行你的意图。
+
+```
+✅ 已给 123456 点赞 10 次
+
+【补充说明】顺便让对方回赞
+```
+
+支持三个变量：
+
+| 变量 | 含义 |
+|------|------|
+| `{tool}` | 工具名 |
+| `{status}` | `成功` / `失败` |
+| `{result}` | 系统原始结果文本 |
+
+例：`如果{status}就告诉对方回赞` 在成功时渲染为「如果成功就告诉对方回赞」。
+留空表示不追加。
 
 ---
 
@@ -183,7 +257,7 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 `create_scheduled_command` · `list_scheduled_commands` · `cancel_scheduled_command` · `delete_scheduled_command`
 
 ### QQ空间 / 互动（4）
-`publish_qzone` · `send_poke` · `send_like` · `recall_by_reply`
+`publish_qzone`（v5.8.0+ 支持图片） · `send_poke` · `send_like` · `recall_by_reply`
 
 ### QQ状态（3）
 `update_qq_status` · `get_qq_status` · `get_fun_status_list`
@@ -444,6 +518,70 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.8.2 — 修复「用户发图→发空间」绕路（路径白名单过严）
+
+**现象**（真机日志）：用户发了张图让它发空间，结果绕了三轮才成功 ——
+先被拒、再分别尝试 `shutil` 和 `open('/AstrBot/...')`（均被沙箱拦），
+最后自己写代码把图重存一份才发出去。
+
+**根因**：AstrBot 会把用户消息里的图片下载到 `data/temp/`
+（`media_image_*.jpg`），这才是 AI 该用的路径；而路径白名单只放行了
+`workspace` / `screenshot_cache` / 闪传目录，**没包含它**，于是被判定越界。
+
+**修复**：`_allowed_file_roots()` 与 `_resolve_image_file()` 同步放行
+`data/temp`。安全边界**未放松** —— 工作区外文件、`..` 穿越、不存在的文件
+仍全部拒绝（13 项断言验证）。
+
+**顺带修复**：`run_python_code` 的工具描述承诺有 `workspace_path` 变量、
+并且反复强调两次，但实现里从未注入（线上 `NameError`）。现已真实注入。
+
+### v5.8.1 — 修复 base64 误入上下文（严重）+ 带图发说说解析修复
+
+**⚠️ base64 曾被当作文本送入 LLM 上下文**：`read_image` 把整段 base64 塞进
+返回值的 `image` 字段，而统一出口只认 `screenshot` 键 → 该字段被序列化成
+**文本**喂给模型。1MB 图的 base64 ≈ 140 万字符 ≈ **数十万 token**，一张就能
+撑爆上下文。此前未爆发纯属侥幸（该函数缺 `import base64`，一进去就崩溃，
+崩溃恰好挡住了泄漏）—— 谁补上 import 就会立刻引爆。
+
+现已改为**只回传文件路径**，由出口统一转成 `ImageContent` 图像块
+（与浏览器截图同一条通道，全程不经文本）；并新增**代码级兑底护栏**
+`_guard_base64_leak()`，在统一出口扫描所有字符串字段，
+拦截 ≥4096 字符的 base64 长串并写告警日志 —— 今后任何新工具重蹈覆辙也会被拦住。
+
+**QQ 空间上传图片误报失败**：上传接口返回的是 JSONP 包装
+（`_Callback({...});`），而代码用 `json.loads` 直接解析 → 失败 → 降级纯文本。
+其实**图已经上传成功了**（日志里可看到 `photozmaz.photo.store.qq.com` 链接），
+只是没解析出来。现已在解析前剥离 JSONP 外壳。
+
+**验证**：护栏 15 项断言全过（含 4095 字符不误伤、混合文本仅替 base64 段、
+告警写入、原对象不被就地修改）；重新扫描 110 个 handler 的 return，
+确认再无 base64 文本。
+
+### v5.8.0 — 空间发说说带图 + 工具返回文案可编辑 + 点赞假成功修复
+
+**✨ `publish_qzone` 支持图片（issue #14）**：此前只能发纯文字，现在可带图
+（最多 9 张）——工作区文件、绝对路径、图片链接均可，**用户发图后直接说
+「发到空间」也行**（未显式传图时自动取引用消息里的图）。图片先上传到空间
+拿 `pic_bo`/`richval` 再随说说提交；纯文本路径保持不变。带图失败会自动降级
+为纯文本，不会整条发不出去。定时指令 `qzone_post` 同样支持 `images`。
+
+> 图片上传链路参考 [Zhalslar/astrbot_plugin_qzone](https://github.com/Zhalslar/astrbot_plugin_qzone)。
+
+**🐛 修复点赞「假成功」（issue #15）**：NapCat 在点赞达上限等失败场景下
+不抛异常、也不返回非 200，而是回 `{"status": "failed", "message": "点赞失败
+今日同一好友点赞数已达上限"}` —— 原实现只靠 `try/except`，于是把失败
+当成了成功。现解析返回体的 `status`/`retcode`/`wording`（含只在 `wording`
+里给原因的变体），失败时如实回报真实原因。
+
+**✨ 新增「工具返回文案」页（issue #15）**：为每个工具追加一段返回给 AI
+的说明（如给点赞工具加「让对方回赞」）。**只追加、不覆盖** —— 系统真实
+结果原样保留，AI 不会因自定义文案而看不到真实成败。支持 `{tool}` /
+`{status}` / `{result}` 三个变量，所有工具（含适配器）自动生效。
+
+**验证**：运行时断言 52 项全通过（点赞判定 8 + 文案追加 12 + 图片链路 25 +
+图片读取 7）；`py_compile` 与 WebUI `node --check` 通过，HTML 标签配对 /
+id 引用 / 11 个页面导航一致性校验通过。
 
 ### v5.7.5 — 仓库更名 + 高危工具权限硬下限修复 + 补充搜索词
 

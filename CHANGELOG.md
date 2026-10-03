@@ -1,3 +1,247 @@
+## [5.8.2] - 2026-10-04
+
+### 🐛 修复（真机日志暴露：路径白名单过严）
+
+#### 1. 「用户发图 → 发到空间」被自己的安全白名单挡住（主因）
+
+**现象**（线上日志）：用户发了一张图并让它发空间，结果绕了三轮才成功：
+
+```
+00:02:09  AI 传 /AstrBot/data/temp/media_image_20261004000145736_86ca.jpg
+00:02:09  [QZoneTools] 路径越界已拒绝
+00:02:09  ❌ 图片读取失败
+00:02:17  AI 改用 shutil       → 被沙箱拦（禁止导入模块: shutil）
+00:02:20  AI 改用 open('/AstrBot/...') → 又被拦
+00:03:15  AI 自己写代码把图重存成 cat_photo.jpg
+00:03:27  用 cat_photo.jpg 才发成功
+```
+
+**根因**：AstrBot 会把用户消息里的图片下载到 `data/temp/`
+（命名如 `media_image_<时间戳>_<随机>.jpg`）。用户「发图 + 让 AI 发到空间」时，
+AI 从事件里拿到的就是这个绝对路径 —— 而 `_allowed_file_roots()`
+只放行了 `workspace` / `screenshot_cache` / 闪传目录，**没有它**，
+于是被 `_safe_resolve_path()` 判定为越界拒绝。
+
+后果不只是慢：AI 为了绕过限制，一度尝试 `shutil`、`open('/AstrBot/...')`
+等操作（均被沙箱拦下，说明沙箱本身工作正常），白耗三轮工具调用与上下文。
+
+**修复**：`_allowed_file_roots()` 与 `_resolve_image_file()` 同步放行
+`os.path.join(get_astrbot_data_path(), "temp")`。
+
+> **安全性不受影响**：该目录是**机器人自己收到的媒体**（用户发给它的），
+> 本就要用于处理，不构成越权读取。工作区外文件、`..` 穿越、
+> 不存在的文件**仍全部拒绝**（见验证）。
+
+#### 2. `run_python_code` 承诺的 `workspace_path` 变量从未注入
+
+**现象**（同一次日志）：
+```
+NameError: name 'workspace_path' is not defined
+    img.save(workspace_path + '/flower.png')
+```
+
+**根因**：工具描述明确写着「代码中可以使用 `workspace_path` 变量访问工作区
+目录……不要硬编码路径，使用 `workspace_path` 变量」，**并且反复强调两次**，
+但实现里只做了 `os.chdir()`，从未真正注入该变量 —— AI 按描述写代码必然报错。
+
+**修复**：脚本前缀里真实注入 `workspace_path = r'<工作区路径>'`，
+`chdir` 改为复用该变量，确保描述与实际一致。
+
+### ✅ 验证
+
+**路径白名单 13 项运行时断言全通过**（用临时目录模拟真实结构）：
+
+| 组 | 覆盖 | 结果 |
+|----|------|------|
+| 放行 | `data/temp` 已进白名单、`media_image_*.jpg` 可解析 | ✅ |
+| 放行 | `workspace` / `screenshot_cache` 仍正常 | ✅ |
+| **边界未放松** | 工作区外文件仍拒绝 | ✅ |
+| **边界未放松** | 根目录外文件仍拒绝 | ✅ |
+| **边界未放松** | `..` 穿越仍拒绝 | ✅ |
+| **边界未放松** | 不存在的文件仍拒绝 | ✅ |
+| 源码级 | 两处白名单均已包含 `temp`（计数 = 2） | ✅ |
+| 源码级 | `workspace_path` 赋值存在且 `chdir` 复用它 | ✅ |
+
+部署后服务器端复核：`py_compile` 通过、容器内 AST 通过、插件加载无报错。
+
+---
+
+## [5.8.1] - 2026-10-03
+
+### 🐛 修复（线上实测暴露）
+
+#### 1. ⚠️ base64 曾被当作**文本**送入 LLM 上下文（严重，极度耗 token）
+
+**问题**：`read_image_tool` 把整段 base64 塞进了返回值的 `image` 字段：
+
+```python
+return {
+    "status": "success",
+    "message": f"图片 {filename} ({len(img_data)/1024:.1f}KB)",
+    "image": f"data:{mime};base64,{b64}",   # ← 这里是隐患
+}
+```
+
+而 `run_wyc_tool` 统一出口**只认 `screenshot` 键**，不认 `image`，
+因此这个 dict 会被原样序列化成**文本**喂给模型。
+
+**量级**：1MB 图片的 base64 ≈ 140 万字符 ≈ **数十万 token**，一张图即可撑爆上下文。
+
+**为何此前未爆发**：该函数没有 `import base64`（顶层也没有），一进入就抛
+`NameError: name 'base64' is not defined`（线上日志实锤）——
+**崩溃恰好挡住了泄漏**。一旦有人"顺手补上 import"，立刻变成上下文炸弹。
+
+**修复**：
+- `read_image_tool` 改为**只回传文件路径**（放进 `screenshot` 字段），
+  由统一出口读成 `ImageContent` 图像块 —— 与浏览器截图完全同一条通道，
+  全程不经过文本
+- 单张图片上限 **4MB**，超限给出明确提示并引导改用 `send_file`
+- 工具描述由「返回base64编码内容」改为「以图像形式返回给模型，不返回base64文本」
+
+#### 2. 统一出口新增 base64 兜底护栏（防再次漏网）
+
+仅修一处不够：今后任何新工具都可能重蹈覆辙，因此增加**代码级护栏**。
+
+`_guard_base64_leak()` 在 `run_wyc_tool` 统一出口扫描返回值：
+
+- 扫描所有字符串字段（含 list/tuple 元素），发现连续 base64 字符 ≥ 4096 的
+  长串，替换为 `[已阻止 base64 文本注入·约 N 字符]` 并写告警日志
+- **阈值 4096**：真正的隐患是十万字符级 base64，4096 以下不误伤正常长字符串
+- `screenshot` 字段跳过检查（图片本就该走这条正轨）
+- 返回副本，不就地修改原结果；非 dict 直接透传
+
+#### 3. QQ 空间上传图片误报失败（真机日志暴露）
+
+**现象**：发带图说说时返回
+`⚠️ 带图发表失败（图片上传失败: 上传响应无法解析: _Callback({"data":...})）`，
+随后降级为纯文本发送。
+
+**根因**：上传接口 `cgi_upload_image` 返回的是 **JSONP 包装**
+（`_Callback({...});`），而 `_upload_image` 用 `json.loads` 直接解析 → 失败。
+
+**关键点**：日志里能清楚看到 `photozmaz.photo.store.qq.com/psc?/...` ——
+**图片其实已经成功上传到空间了**，只是响应没解析出来，被误判为失败。
+
+**修复**：解析前先剥离 JSONP 外壳（取首个 `{` 到末个 `}` 的片段），
+再交给 `json.loads`；仍无法解析时如实返回失败文案，不抛异常。
+
+### ✅ 验证
+
+- **base64 护栏 15 项运行时断言全通过**：短文不动作、4095 字符不拦（防误伤）、
+  5000 字符拦截、`data:...;base64,` 前缀拦截、混合文本仅替换 base64 段而保留
+  前后正常文字、list 元素拦截、告警日志确实写入、非 dict 透传、原对象未被就地修改
+- **JSONP 解析**：构造真实 `_Callback({...});` 报文，成功提取 `pic_bo`；
+  构造无法解析的垃圾内容，确认返回失败而非抛异常
+- **全量复查**：重新扫描全部 110 个工具 handler 的 `return` 语句，
+  确认**再无任何一处**把 base64 写进返回值
+- 部署后服务器端复核：`py_compile` 通过、容器内 AST 通过、插件加载无报错
+
+---
+
+## [5.8.0] - 2026-10-03
+
+### ✨ 新功能
+
+#### 1. QQ 空间发说说支持图片（issue #14）
+
+**背景**：此前 `publish_qzone` 只能发纯文字，AI 生成的图片没法发到空间。
+虽然 `QzoneAPI.publish_post()` 早就预留了 `images` 参数，但**从未实现图片
+上传链路**（只发 `con` 文本字段），参数形同虚设。
+
+**实现**（参考 [astrbot_plugin_qzone](https://github.com/Zhalslar/astrbot_plugin_qzone)
+的 `pic_bo` / `richval` 方案）：
+
+- 新增 `QzoneAPI._upload_image()` / `upload_images()`：先调
+  `up.qzone.qq.com/cgi-bin/upload/cgi_upload_image` 上传图片，拿到
+  `pic_bo`（逗号分隔）与 `richval`（`\t` 分隔）
+- `publish_post()` 带图时改用 `format=json` 并把 `pic_bo` / `richtype=1` /
+  `richval` 一并提交；**纯文本路径保持原样**（`format=fs`），不影响既有发布
+- 新增 `_load_image_bytes()`：统一把「工作区文件名 / 绝对路径 / `base64://`
+  内联 / http(s) 链接」读成字节流，单张上限 15MB
+  - http(s) 走与 `fetch_url` 同一套 **SSRF 校验**（DNS 解析 + 黑名单）
+  - 本地文件走 `_safe_resolve_path()` 受限解析，拒绝路径穿越
+- `publish_qzone` 工具新增 `images` 参数（数组，最多 9 张，符合空间上限）
+- **未显式传图时自动尝试取当前消息引用的图片**，用户发图 + 说「发到空间」即可
+- 失败降级：带图发表失败会自动改发纯文本，避免整条说说发不出去；
+  单张图读取失败只跳过该张并如实告知
+
+#### 2. 定时发说说支持图片（issue #14）
+
+`create_scheduled_command` 的 `qzone_post` 分支打通图片链路：
+
+```json
+{"content": "晚安", "images": ["chart.png"]}
+```
+
+图片在**执行时刻**才读取（而非创建时），因此可以引用届时才生成的产物。
+
+#### 3. 「工具返回文案」— 为每个工具自定义返回给 AI 的说明（issue #15）
+
+**背景**：用户希望工具返回给 AI 的文本可以自定义。例如给点赞工具加一句
+「顺便让对方回赞」。
+
+**设计口径**：**只追加、不覆盖**。系统真实结果（✅/❌）原样保留，自定义文案
+追加在末尾并加 `【补充说明】` 前缀 —— 这样 AI 既能执行用户意图，又不会
+被自定义文案掩盖真实成败（否则与 issue #15 第 1 条「要真实结果」自相矛盾）。
+
+- 后端：`data_dir/tool_result_notes.json` 独立存储（原子写），沿用
+  `tool_keywords.json` 的模式，避开 AstrBot 配置完整性检查对动态键的清理
+- 支持变量：`{tool}` 工具名、`{status}` 成功/失败、`{result}` 系统原始结果
+- 出口收口：在 `run_wyc_tool` 统一出口调用 `_apply_tool_note()`，
+  **所有工具（含适配器工具）自动生效**，不依赖各 handler 自觉
+- WebUI 新增「**工具返回文案**」标签页：按工具逐个编辑，支持搜索、
+  按类型分组筛选、点按钮插入变量；有改动时右下角浮出保存按钮
+- 新增 2 个 WebUI API：`tool_notes`（GET）、`tool_notes_save`（POST，
+  仅接受真实枚举到的工具名，防伪造写入）
+
+### 🐛 修复
+
+#### 点赞「假成功」上报（issue #15）
+
+**现象**：当天已给某人点满 10 赞后再次点赞，工具仍返回「✅ 已点赞 10 次」，
+实际没有点成功。
+
+**根因**：NapCat 在点赞达上限等失败场景下**不抛异常、也不返回非 200**，
+而是回 `{"status": "failed", "retcode": 200, "message": "点赞失败 今日
+同一好友点赞数已达上限"}`。原实现只靠 `try/except`，于是把失败当成了成功。
+
+**修复**：
+- 新增 `_inspect_action_result()` + `_call_checked()`：解析返回体的
+  `status` / `retcode` / `wording`，识别各类失败形态（含只在 `wording`
+  里给原因、`data` 为 null 的变体）
+- `send_like_tool` 改用 `_call_checked()`，失败时返回
+  「❌ 点赞未成功：<真实原因>」，不再误报
+- 对无返回体 / 非 dict 的情况仍按成功处理，保持对第三方适配器的兼容
+- 顺带修正 `times` 的取值：钳制到 `1..20`，避免非法输入（如 0 或字符串）
+  导致接口报错
+
+### ✅ 验证
+
+- **运行时断言 52 项全部通过**（抽取真实函数执行，非静态检查）
+  - `_inspect_action_result` 8 项：覆盖真实 NapCat 失败报文（点赞上限 /
+    账号转换失败）、成功报文、无返回体、非 dict、非法 retcode、
+    仅 `wording` 的变体
+  - `_apply_tool_note` 12 项：无文案透传且不改动对象、有文案追加、
+    三个变量各自替换、失败状态变量、无 `message` 字段不追加、
+    非 dict 不追加、保留其它字段（如 `screenshot`）
+  - `QzoneAPI` 图片链路 25 项：上传调用次数 / `pic_bo` 拼接 /
+    `richval` 制表符拼接 / 上传体含 base64 与 `skey`/`p_skey` /
+    带图发布 payload 七项字段 / 纯文本路径不回归（`format=fs`、无 `pic_bo`）/
+    `pre_uploaded` 复用不重复上传 / 未初始化报错 / 上传失败传播
+  - `_load_image_bytes` 7 项：base64 解码、空输入、http 取字节、
+    SSRF 拦截且**不发起请求**、文件不存在
+- 语法与结构：`main.py` `py_compile` 通过；WebUI `node --check` 通过；
+  HTML 标签配对（div/nav/button/textarea/select 全平）、
+  `getElementById` 引用差集为空、11 个页面导航三方一致
+
+### 🙏 致谢
+
+- 图片上传链路参考 [Zhalslar/astrbot_plugin_qzone](https://github.com/Zhalslar/astrbot_plugin_qzone)
+  的 `_upload_image` / `publish` 实现（`pic_bo` + `richval` 方案）
+- 点赞假成功与自定义文案需求来自 issue #15（@onexb）
+
+---
+
 ## [5.7.5] - 2026-10-01
 
 ### 🔒 安全修复（严重）

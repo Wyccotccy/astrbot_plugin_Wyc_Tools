@@ -892,17 +892,122 @@ class QzoneSession:
 
 
 class QzoneAPI:
+    # 图片上传接口（较脆弱，参考 astrbot_plugin_qzone 实现）
+    UPLOAD_IMAGE_URL = "https://up.qzone.qq.com/cgi-bin/upload/cgi_upload_image"
+
     def __init__(self, session: QzoneSession):
         self.session = session
 
-    async def publish_post(self, text: str, images: list = None) -> dict:
-        images = images or []
+    async def _upload_image(self, image: bytes, sess: aiohttp.ClientSession = None) -> dict:
+        """上传单张图片到 QQ 空间，返回 {success, pic_bo, richval, msg}。"""
+        if not self.session.initialized:
+            return {"success": False, "msg": "会话未初始化"}
+        cookie_dict = self.session._cookie_to_dict(self.session.cookie)
+        p_skey = cookie_dict.get('p_skey', '')
+        skey = cookie_dict.get('skey', '')
+        try:
+            import base64 as _b64
+            payload = {
+                'filename': 'filename',
+                'uploadtype': '1',
+                'albumtype': '7',
+                'skey': skey,
+                'uin': self.session.uin,
+                'p_skey': p_skey,
+                'output_type': 'json',
+                'base64': '1',
+                'picfile': _b64.b64encode(image).decode(),
+            }
+            headers = {
+                'Cookie': self.session.cookie,
+                'Origin': 'https://user.qzone.qq.com',
+                'Referer': f'https://user.qzone.qq.com/{self.session.uin}',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+            own_sess = sess is None
+            if own_sess:
+                sess = aiohttp.ClientSession()
+            try:
+                async with sess.post(self.UPLOAD_IMAGE_URL, data=payload,
+                                     headers=headers, timeout=60) as resp:
+                    text = await resp.text()
+            finally:
+                if own_sess:
+                    await sess.close()
+            # 接口可能返回 JSONP 包装（形如 _Callback({...}); ），先剥离
+            body = text.strip()
+            if not body.startswith("{"):
+                m = re.search(r"\{.*\}", body, re.S)
+                if m:
+                    body = m.group(0)
+            try:
+                data = json.loads(body)
+            except (ValueError, json.JSONDecodeError):
+                return {"success": False, "msg": f"上传响应无法解析: {text[:200]}"}
+            if str(data.get('ret', data.get('code', ''))) not in ('0', ''):
+                return {"success": False, "msg": f"上传被拒绝: {str(data.get('msg', data))[:200]}"}
+            payload_data = data.get('data') or {}
+            url = payload_data.get('url', '')
+            if not url or ("&bo=" not in url and "?bo=" not in url):
+                return {"success": False, "msg": f"上传结果缺少图片标识: {str(data)[:200]}"}
+            pic_bo = re.split(r"[?&]bo=", url, maxsplit=1)[1]
+            richval = ",{},{},{},{},{},{},,{},{}".format(
+                payload_data.get('albumid', ''),
+                payload_data.get('lloc', ''),
+                payload_data.get('sloc', ''),
+                payload_data.get('type', ''),
+                payload_data.get('height', ''),
+                payload_data.get('width', ''),
+                payload_data.get('height', ''),
+                payload_data.get('width', ''),
+            )
+            return {"success": True, "pic_bo": pic_bo, "richval": richval, "msg": "上传成功"}
+        except Exception as e:
+            return {"success": False, "msg": _safe_error_msg(e)}
+
+    async def upload_images(self, images: list) -> dict:
+        """批量上传图片，返回 {success, pic_bo, richval, uploaded, msg}。"""
+        images = [i for i in (images or []) if i]
+        if not images:
+            return {"success": True, "pic_bo": "", "richval": "", "uploaded": 0, "msg": "无图片"}
+        pic_bos, richvals = [], []
+        async with aiohttp.ClientSession() as sess:
+            for img in images:
+                res = await self._upload_image(img, sess=sess)
+                if not res.get("success"):
+                    return {"success": False, "uploaded": len(pic_bos), "msg": res.get("msg", "上传失败")}
+                pic_bos.append(res["pic_bo"])
+                richvals.append(res["richval"])
+        return {
+            "success": True,
+            "pic_bo": ",".join(pic_bos),
+            "richval": "\t".join(richvals),
+            "uploaded": len(pic_bos),
+            "msg": f"已上传 {len(pic_bos)} 张图片",
+        }
+
+    async def publish_post(self, text: str, images: list = None, pre_uploaded: dict = None) -> dict:
+        """发表说说。
+
+        images 为已读取的图片字节列表；pre_uploaded 可传入 upload_images() 的结果
+        以避免重复上传（定时任务复用场景）。
+        """
+        images = [i for i in (images or []) if i]
         if not self.session.initialized:
             return {"success": False, "msg": "会话未初始化"}
         try:
+            pic_bo = richval = ""
+            if images or pre_uploaded:
+                up = pre_uploaded or await self.upload_images(images)
+                if not up.get("success"):
+                    return {"success": False, "msg": f"图片上传失败：{up.get('msg', '未知原因')}"}
+                pic_bo = up.get("pic_bo", "")
+                richval = up.get("richval", "")
             url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6?g_tk={self.session.gtk}"
             payload = {
                 'syn_tweet_verson': '1',
+                'paramstr': '1',
+                'who': '1',
                 'con': text,
                 'feedversion': '1',
                 'ver': '1',
@@ -910,9 +1015,16 @@ class QzoneAPI:
                 'to_sign': '0',
                 'hostuin': self.session.uin,
                 'code_version': '1',
-                'format': 'fs',
-                'qzreferrer': f'https://user.qzone.qq.com/{self.session.uin}/infocenter',
+                'format': 'json',
+                'qzreferrer': f'https://user.qzone.qq.com/{self.session.uin}',
             }
+            if pic_bo:
+                payload['pic_bo'] = pic_bo
+                payload['richtype'] = '1'
+                payload['richval'] = richval
+            else:
+                # 无图片时保持旧接口行为，避免影响既有纯文本发布
+                payload['format'] = 'fs'
             encoded_data = urlencode(payload)
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -924,8 +1036,18 @@ class QzoneAPI:
             async with aiohttp.ClientSession() as sess:
                 async with sess.post(url, data=encoded_data, headers=headers, timeout=30) as resp:
                     response_text = await resp.text()
-                    if '"code":0' in response_text or '"code": 0' in response_text:
-                        return {"success": True, "msg": "发表成功"}
+                    ok = ('"code":0' in response_text or '"code": 0' in response_text
+                          or '"code":0,' in response_text)
+                    if not ok:
+                        # 带图发布走 json，成功时返回 {"code":0,...}
+                        try:
+                            body = json.loads(response_text)
+                            ok = str(body.get('code', '')) == '0' or bool(body.get('tid'))
+                        except (ValueError, json.JSONDecodeError):
+                            ok = False
+                    if ok:
+                        suffix = f"（含 {len(images)} 张图片）" if pic_bo else ""
+                        return {"success": True, "msg": f"发表成功{suffix}"}
                     return {"success": False, "msg": f"响应: {response_text[:200]}"}
         except Exception as e:
             return {"success": False, "msg": _safe_error_msg(e)}
@@ -1178,10 +1300,20 @@ class ScheduledCommandExecutor:
                 return
             if command_type == "qzone_post":
                 content = params.get("content", "")
-                if content:
+                images = params.get("images") or []
+                if not isinstance(images, list):
+                    images = [images]
+                if content or images:
                     success = await self.plugin.session.initialize(client)
                     if success:
-                        await self.plugin.qzone.publish_post(content)
+                        blobs = []
+                        for ref in images:
+                            blob = await self.plugin._load_image_bytes(ref)
+                            if blob:
+                                blobs.append(blob)
+                            else:
+                                logger.warning(f"[定时说说] 图片读取失败已跳过: {ref}")
+                        await self.plugin.qzone.publish_post(content or "", images=blobs)
             elif command_type == "status_change":
                 status = params.get("status", "online")
                 duration = params.get("duration_minutes", 30)
@@ -1291,6 +1423,8 @@ class Main(Star):
         self._tool_permissions = self._load_tool_permissions()
         # 补充搜索词（独立存储；用户为工具追加的关键词，与内置 keywords 叠加）
         self._tool_keywords = self._load_tool_keywords()
+        # 自定义工具返回文案（独立存储；追加在工具返回给 AI 的文本末尾，issue #15）
+        self._tool_notes = self._load_tool_notes()
         # 所有工具的 enable_* 开关集合（用于 WebUI 保存白名单，避免开关被丢弃）
         self._tool_enable_keys = {f"enable_{name}" for name in self._tool_registry}
         # 工具适配器：按勾选状态注册命令工具（此时后加载的插件尚未注册，
@@ -1483,6 +1617,147 @@ class Main(Star):
                 seen.add(s.lower())
                 merged.append(s)
         return merged
+
+    # ==================== 工具返回文案（issue #15） ====================
+    # 用户可为任意工具配置一段附加文案，追加在该工具返回给 AI 的文本末尾。
+    # 仅追加、不覆盖系统真实结果 —— AI 仍能看到真实的成功/失败。
+
+    def _tool_notes_file(self) -> str:
+        return os.path.join(self.data_dir, "tool_result_notes.json")
+
+    def _load_tool_notes(self) -> Dict[str, str]:
+        """载入自定义返回文案 {tool_name: note}。"""
+        path = self._tool_notes_file()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            raw = data.get("notes", {})
+            if not isinstance(raw, dict):
+                return {}
+            out = {}
+            for k, v in raw.items():
+                if isinstance(k, str) and isinstance(v, str) and v.strip():
+                    out[k] = v
+            return out
+        except Exception as e:
+            logger.error(f"[QZoneTools] 读取 tool_result_notes.json 失败: {_safe_error_msg(e)}")
+            return {}
+
+    def _save_tool_notes(self, notes: Dict[str, str]) -> bool:
+        """原子写入自定义返回文案。"""
+        path = self._tool_notes_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"notes": notes}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True
+        except Exception as e:
+            logger.error(f"[QZoneTools] 写入 tool_result_notes.json 失败: {_safe_error_msg(e)}")
+            return False
+
+    def _get_tool_note(self, tool_name: str) -> str:
+        """取得某工具的自定义返回文案（无则空串）。"""
+        if isinstance(self._tool_notes, dict):
+            v = self._tool_notes.get(tool_name)
+            if isinstance(v, str):
+                return v.strip()
+        return ""
+
+    def _apply_tool_note(self, tool_name: str, result):
+        """在工具返回结果末尾追加用户自定义文案。
+
+        仅追加、不覆盖系统真实结果 —— AI 仍能看到真实的成功/失败。
+        支持变量：{tool} 工具名、{status} 成功/失败、{result} 原始结果文本。
+        """
+        note = self._get_tool_note(tool_name)
+        if not note or not isinstance(result, dict):
+            return result
+        msg = result.get("message")
+        if not isinstance(msg, str) or not msg:
+            return result
+        ok = str(result.get("status", "")).lower() in ("success", "ok", "true")
+        try:
+            text = (note.replace("{tool}", tool_name)
+                        .replace("{status}", "成功" if ok else "失败")
+                        .replace("{result}", msg))
+        except Exception:
+            text = note
+        text = text.strip()
+        if not text:
+            return result
+        out = dict(result)
+        out["message"] = f"{msg}\n\n【补充说明】{text}"
+        return out
+
+    # 文本中出现超长 base64 串即视为误入（阈值 4096，避免误伤正常长字符串）
+    _B64_TEXT_MIN_RUN = 4096
+    _B64_PATTERN = re.compile(r"[A-Za-z0-9+/]{4096,}={0,2}")
+
+    def _guard_base64_leak(self, tool_name: str, result):
+        """兜底护栏：阻止 base64 长串作为**文本**进入 LLM 上下文。
+
+        背景：工具返回值会被序列化成文本喂给模型。1MB 图片的 base64 约
+        140 万字符（数十万 token），一张图即可撑爆上下文。
+
+        正确通道：把图片**路径**放进 ``screenshot`` 字段，由统一出口读成
+        ``ImageContent`` 图像块（不经过文本，与浏览器截图同一条路）。
+        本方法兜住所有漏网情况，扫描返回值里的字符串字段并替换超长串。
+        """
+        if not isinstance(result, dict):
+            return result
+
+        def _clean(s: str):
+            """返回 (处理后的字符串, 命中处数)。"""
+            if len(s) < self._B64_TEXT_MIN_RUN:
+                return s, 0
+            hits = [0]
+
+            def _sub(m):
+                hits[0] += 1
+                return f"[已阻止 base64 文本注入·约 {len(m.group(0))} 字符]"
+
+            return self._B64_PATTERN.sub(_sub, s), hits[0]
+
+        out = None
+        total = 0
+        for k, v in result.items():
+            if k == "screenshot":      # 图片走正轨，不检查
+                continue
+            if isinstance(v, str):
+                nv, c = _clean(v)
+                if c:
+                    total += c
+                    if out is None:
+                        out = dict(result)
+                    out[k] = nv
+            elif isinstance(v, (list, tuple)):
+                items, changed = [], False
+                for it in v:
+                    if isinstance(it, str):
+                        ni, c = _clean(it)
+                        if c:
+                            total += c
+                            changed = True
+                        items.append(ni)
+                    else:
+                        items.append(it)
+                if changed:
+                    if out is None:
+                        out = dict(result)
+                    out[k] = items
+        if out is None:
+            return result
+        logger.warning(
+            f"[QZoneTools] 已拦截 {total} 处 base64 文本（tool={tool_name}）——"
+            f"该工具应改用 screenshot 字段回传图片路径，请检查实现"
+        )
+        return out
 
     def _migrate_legacy_dirs(self) -> None:
         """把旧版本误写在插件安装目录内的持久化数据迁移到 data_dir。
@@ -2516,18 +2791,24 @@ class Main(Star):
         # ---------- QQ空间 ----------
         registry["publish_qzone"] = {
             "name": "publish_qzone",
-            "description": "发布QQ空间说说（需要机器人已登录且支持QQ空间操作）。",
+            "description": "发布QQ空间说说，支持纯文字或带图片（需要机器人已登录且支持QQ空间操作）。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "说说内容，必填"}
+                    "content": {"type": "string", "description": "说说内容，必填"},
+                    "images": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "图片列表，可选。每项为工作区文件名（如 chart.png）、绝对路径或 http(s) 图片链接，最多 9 张"
+                    }
                 },
                 "required": ["content"]
             },
             "keywords": [
                 "发说说", "空间动态", "QQ空间", "发空间", "publish post", "qzone", "说说", "发一条说说", "写说说",
                 "分享到空间", "空间发文", "空间说说", "发表动态", "空间状态", "空间日志", "写日志", "post to qzone",
-                "update qzone", "share to qzone", "qzone feed", "说说内容", "发个说说", "更新空间", "发动态"
+                "update qzone", "share to qzone", "qzone feed", "说说内容", "发个说说", "更新空间", "发动态",
+                "带图发说说", "说说配图", "发图说说", "空间配图", "发带图动态", "图片说说", "说说加图片", "发照片到空间"
             ],
             "handler": self.publish_qzone
         }
@@ -2607,7 +2888,7 @@ class Main(Star):
                 "properties": {
                     "command_type": {"type": "string", "description": "指令类型，必填。可选值：qzone_post(发说说), status_change(改状态), llm_remind(LLM提醒)"},
                     "execute_time": {"type": "string", "description": "执行时间，必填。支持格式：YYYY-MM-DD HH:MM、HH:MM、每天的HH:MM"},
-                    "params": {"type": "string", "description": "指令参数，JSON格式字符串，必填。例如：{\"content\": \"晚安\"}"},
+                    "params": {"type": "string", "description": "指令参数，JSON格式字符串，必填。例如：{\"content\": \"晚安\"}；发空间可带图：{\"content\": \"晚安\", \"images\": [\"pic.png\"]}"},
                     "recurrence": {"type": "string", "description": "重复类型，可选值：once(单次)/daily(每天)，默认once"}
                 },
                 "required": ["command_type", "execute_time", "params"]
@@ -3684,7 +3965,7 @@ class Main(Star):
 
         registry["read_image"] = {
             "name": "read_image",
-            "description": "读取图片文件并返回base64编码内容。支持工作区文件名、绝对路径、或截图路径（screenshot_cache中的文件）。用于查看Python代码生成的图表、截图等。",
+            "description": "查看图片内容（以图像形式返回给模型，不返回base64文本）。支持工作区文件名、绝对路径、或截图路径（screenshot_cache中的文件）。用于查看Python代码生成的图表、截图等。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -4322,6 +4603,10 @@ class Main(Star):
                 result = await handler(event, **args_dict)
             # 隐私模式下对返回文本脱敏（隐藏群号/QQ号）
             result = self._privacy_filter_result(result)
+            # 自定义返回文案：追加在工具返回给 AI 的文本末尾（issue #15，仅追加不覆盖真实结果）
+            result = self._apply_tool_note(tool_name, result)
+            # 兜底护栏：阻止 base64 长串作为文本进入 LLM 上下文（极耗 token）
+            result = self._guard_base64_leak(tool_name, result)
             # 浏览器操作增强显示：叠加操作图标 + 按需把截图推送给用户（纯代码实现）
             if isinstance(result, dict) and result.get("screenshot"):
                 result = await self._apply_action_overlay(event, tool_name, args_dict, result)
@@ -4828,6 +5113,8 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/adapter_save", self.handle_adapter_save, ["POST"], "保存适配器勾选")
             self.context.register_web_api(f"/{PLUGIN_NAME}/tool_keywords", self.handle_get_tool_keywords, ["GET"], "获取补充搜索词")
             self.context.register_web_api(f"/{PLUGIN_NAME}/tool_keywords_save", self.handle_save_tool_keywords, ["POST"], "保存补充搜索词")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tool_notes", self.handle_get_tool_notes, ["GET"], "获取工具返回文案")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/tool_notes_save", self.handle_save_tool_notes, ["POST"], "保存工具返回文案")
             logger.info("[QZoneTools] WebUI API 已注册")
         except Exception as e:
             logger.error(f"[QZoneTools] 注册失败: {e}")
@@ -4985,6 +5272,61 @@ class Main(Star):
             return jsonify({"success": True, "saved": saved, "cleared": cleared, "skipped": skipped})
         except Exception as e:
             logger.error(f"[WebUI] 保存补充搜索词失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_get_tool_notes(self):
+        """返回全部工具的当前自定义返回文案，供「工具返回文案」页编辑。"""
+        try:
+            self._rebuild_adapter_tools()  # 幂等，保证适配器工具也在列表里
+            items = []
+            for name, meta in self._tool_registry.items():
+                items.append({
+                    "tool_name": name,
+                    "description": str(meta.get("description") or "")[:120],
+                    "is_command": bool(meta.get("is_command")),
+                    "note": self._get_tool_note(name),
+                })
+            items.sort(key=lambda x: (not x["is_command"], x["tool_name"]))
+            return jsonify({"success": True, "items": items,
+                            "note_count": sum(1 for i in items if i["note"])})
+        except Exception as e:
+            logger.error(f"[WebUI] 获取工具返回文案失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_save_tool_notes(self):
+        """保存自定义返回文案。仅接受 registry 里真实存在的工具名。
+
+        请求体：{"notes": {"<tool_name>": "文案"}}
+        传空串等于清除该工具的文案；未出现在请求里的工具保持原样（增量合并）。
+        支持变量：{tool} 工具名、{status} 成功/失败、{result} 原始结果文本。
+        """
+        try:
+            data = await request.get_json()
+            incoming = data.get("notes", {}) if isinstance(data, dict) else None
+            if not isinstance(incoming, dict):
+                return jsonify({"success": False, "error": "格式错误：notes 必须是对象"})
+            current = dict(self._tool_notes) if isinstance(self._tool_notes, dict) else {}
+            saved, cleared, skipped = 0, 0, 0
+            for tool_name, note in incoming.items():
+                if not isinstance(tool_name, str) or tool_name not in self._tool_registry:
+                    skipped += 1
+                    continue
+                text = str(note).strip() if note is not None else ""
+                if len(text) > 1000:  # 单工具上限，防滥用
+                    text = text[:1000]
+                if text:
+                    current[tool_name] = text
+                    saved += 1
+                else:
+                    if current.pop(tool_name, None) is not None:
+                        cleared += 1
+            if not self._save_tool_notes(current):
+                return jsonify({"success": False, "error": "写入 tool_result_notes.json 失败，请查看日志"})
+            self._tool_notes = current
+            logger.info(f"[QZoneTools] 工具返回文案已保存（{saved} 个工具，清除 {cleared}，跳过 {skipped}）")
+            return jsonify({"success": True, "saved": saved, "cleared": cleared, "skipped": skipped})
+        except Exception as e:
+            logger.error(f"[WebUI] 保存工具返回文案失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_save_config(self):
@@ -5977,6 +6319,43 @@ class Main(Star):
             client.call_action(action, **params), timeout=timeout
         )
 
+    async def _call_checked(self, client, action: str, timeout: float = None, **params) -> Tuple[bool, Any, str]:
+        """带返回体校验的 NapCat 调用：返回 (是否成功, 原始数据, 失败原因)。
+
+        NapCat 在部分失败场景下**不抛异常、也不返回非 200**，而是回
+        ``{"status": "failed", "retcode": 200, "message": "点赞失败 今日同一好友点赞数已达上限"}``。
+        只靠 try/except 会把这类失败当成成功上报（issue #15 的根因）。
+        本方法统一解析返回体的 status/retcode，无返回体或非 dict 时按成功处理
+        （保持对第三方适配器的兼容）。
+        """
+        raw = await self._call(client, action, timeout=timeout, **params)
+        ok, reason = self._inspect_action_result(raw)
+        return ok, raw, reason
+
+    @staticmethod
+    def _inspect_action_result(raw: Any) -> Tuple[bool, str]:
+        """判断 NapCat 返回体是否表示成功，失败时给出原因文案。"""
+        if not isinstance(raw, dict):
+            return True, ""
+        status = str(raw.get("status", "") or "").lower()
+        if status in ("failed", "fail", "error"):
+            msg = str(raw.get("message") or raw.get("wording") or "").strip()
+            return False, msg or "接口返回失败"
+        retcode = raw.get("retcode")
+        if retcode is not None:
+            try:
+                if int(retcode) not in (0, 1, 100):
+                    msg = str(raw.get("message") or raw.get("wording") or "").strip()
+                    return False, msg or f"接口返回 retcode={retcode}"
+            except (TypeError, ValueError):
+                pass
+        # data 为 null 且带 wording 时通常是失败（部分 NapCat 版本不回 status）
+        if raw.get("data", "") is None and status not in ("ok", "async"):
+            wording = str(raw.get("wording") or "").strip()
+            if wording:
+                return False, wording
+        return True, ""
+
     async def _update_contacts_cache(self, client):
         # 先判断是否需要刷新，避免在持锁期间做网络 IO
         now = time.time()
@@ -6196,6 +6575,14 @@ class Main(Star):
             roots.append(os.path.realpath(os.path.join(self.data_dir, "screenshot_cache")))
         except Exception:
             pass
+        # AstrBot 会把用户消息里的图片/文件下载到 data/temp（如 media_image_*.jpg）。
+        # 用户「发图 + 让 AI 发到空间」时，AI 拿到的就是该目录的绝对路径，
+        # 必须放行 —— 否则被本函数拒绝，AI 只能绕道把图重存一份（线上实测踩过，
+        # 白白多花 3 轮工具调用）。该目录是机器人自己收到的媒体，不构成越权读取。
+        try:
+            roots.append(os.path.realpath(os.path.join(get_astrbot_data_path(), "temp")))
+        except Exception:
+            pass
         if self.flash_transfer_dir:
             try:
                 roots.append(os.path.realpath(self.flash_transfer_dir))
@@ -6259,6 +6646,7 @@ class Main(Star):
                 allowed_prefixes = (
                     os.path.realpath(self.workspace_dir),
                     os.path.realpath(self.flash_transfer_dir),
+                    os.path.realpath(os.path.join(get_astrbot_data_path(), "temp")),
                     "/tmp",
                 )
                 if not any(real_path.startswith(p) for p in allowed_prefixes):
@@ -6425,19 +6813,113 @@ class Main(Star):
         msg = "\n".join(lines)
         return {"status": "success", "message": msg}
 
-    async def publish_qzone(self, event: AstrMessageEvent, content: str) -> dict:
-        if not content or content.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供说说内容。"}
+    MAX_QZONE_IMAGES = 9  # QQ 空间说说图片上限
+
+    async def _load_image_bytes(self, ref: str) -> Optional[bytes]:
+        """把图片引用读成字节流。
+
+        支持：工作区文件名 / 绝对路径（受安全限制）、base64:// 内联、http(s) 链接。
+        读取失败返回 None。
+        """
+        if not ref or not str(ref).strip():
+            return None
+        import base64 as _b64
+        ref = str(ref).strip()
+        try:
+            if ref.startswith("base64://"):
+                return _b64.b64decode(ref[len("base64://"):])
+            if ref.startswith("http://") or ref.startswith("https://"):
+                from urllib.parse import urlparse
+                _blocked = (list(DEFAULT_SSRF_BLACKLIST)
+                            + list(self.ssrf_blocked_urls)
+                            + list(self.ssrf_custom_blocked_ranges))
+                _host = urlparse(ref).hostname or ""
+                _reason = await _resolve_and_check_host(_host, _blocked) if _host else None
+                if _reason:
+                    logger.warning(f"[QZoneTools] 说说图片链接被 SSRF 拦截: {_reason}")
+                    return None
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(ref, timeout=30) as resp:
+                        if resp.status != 200:
+                            return None
+                        data = await resp.read()
+                        if len(data) > 15 * 1024 * 1024:  # 单张 15MB 上限
+                            logger.warning("[QZoneTools] 发说说图片过大已跳过")
+                            return None
+                        return data
+            # 本地文件：先尝试受限解析，再回退到已解析的绝对路径
+            real = self._safe_resolve_path(ref)
+            if not real:
+                resolved = await self._resolve_image_file(ref)
+                if resolved and resolved.startswith("base64://"):
+                    return _b64.b64decode(resolved[len("base64://"):])
+                return None
+            with open(real, "rb") as f:
+                data = f.read()
+            if len(data) > 15 * 1024 * 1024:
+                logger.warning("[QZoneTools] 发说说图片过大已跳过")
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"[QZoneTools] 读取发说说图片失败({ref}): {_safe_error_msg(e)}")
+            return None
+
+    async def _collect_qzone_images(self, event: AstrMessageEvent, images) -> Tuple[list, list]:
+        """收集并读取图片，返回 (字节列表, 失败引用列表)。"""
+        refs: list = []
+        if isinstance(images, str):
+            # 兼容 LLM 传逗号分隔字符串或单个 URL
+            refs = [s.strip() for s in re.split(r"[,\n]", images) if s.strip()]
+        elif isinstance(images, (list, tuple)):
+            refs = [str(i).strip() for i in images if str(i).strip()]
+        elif images:
+            refs = [str(images).strip()]
+        # 引用消息里的图片：LLM 未显式给图时尝试取当前消息的图片
+        if not refs:
+            try:
+                for comp in event.get_messages():
+                    if isinstance(comp, Image) and getattr(comp, "url", None):
+                        refs.append(comp.url)
+            except Exception:
+                pass
+        refs = refs[: self.MAX_QZONE_IMAGES]
+        blobs, failed = [], []
+        for ref in refs:
+            blob = await self._load_image_bytes(ref)
+            if blob:
+                blobs.append(blob)
+            else:
+                failed.append(ref)
+        return blobs, failed
+
+    async def publish_qzone(self, event: AstrMessageEvent, content: str, images=None) -> dict:
+        images = images or []
+        if (not content or content.strip() == "") and not images:
+            return {"status": "error", "message": "❌ 参数缺失：请提供说说内容或图片。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
         success = await self.session.initialize(client)
         if not success:
             return {"status": "error", "message": "错误：无法初始化QQ空间，请检查网络或重新登录"}
-        result = await self.qzone.publish_post(content)
+        blobs, failed = await self._collect_qzone_images(event, images)
+        if failed and not blobs:
+            return {"status": "error", "message": f"❌ 图片读取失败：{', '.join(failed[:3])}。请确认文件在工作区内或提供有效链接。"}
+        result = await self.qzone.publish_post(content or "", images=blobs)
         if result.get('success'):
-            return {"status": "success", "message": result['msg']}
+            msg = result['msg']
+            if failed:
+                msg += f"\n⚠️ 有 {len(failed)} 张图片未能读取已跳过：{', '.join(failed[:3])}"
+            return {"status": "success", "message": msg}
         else:
+            # 带图失败时降级为纯文本，避免整条说说发不出去
+            if blobs:
+                fallback = await self.qzone.publish_post(content or "")
+                if fallback.get('success'):
+                    return {
+                        "status": "success",
+                        "message": f"⚠️ 带图发表失败（{result['msg'][:120]}），已改为纯文本发送成功。",
+                    }
             return {"status": "error", "message": result['msg']}
 
     async def send_poke(self, event: AstrMessageEvent, target_qq: str, chat_type: str = "auto") -> dict:
@@ -7101,8 +7583,19 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await self._call(client, 'send_like', user_id=user_id, times=min(times, 20))
-            return {"status": "success", "message": f"✅ 已给 {user_id} 点赞 {times} 次"}
+            like_times = max(1, min(int(times), 20))
+        except (TypeError, ValueError):
+            like_times = 1
+        try:
+            ok, _raw, reason = await self._call_checked(
+                client, 'send_like', user_id=user_id, times=like_times
+            )
+            if not ok:
+                return {
+                    "status": "error",
+                    "message": f"❌ 点赞未成功：{reason}（目标 {user_id}）",
+                }
+            return {"status": "success", "message": f"✅ 已给 {user_id} 点赞 {like_times} 次"}
         except Exception as e:
             return {"status": "error", "message": f"点赞失败: {_safe_error_msg(e)}"}
 
@@ -7638,10 +8131,11 @@ class Main(Star):
         script_content = (
             "import sys\n"
             "\n"
-            "# 设置工作区路径\n"
+            "# 设置工作区路径（同时暴露 workspace_path 变量，工具描述已承诺）\n"
+            "import os as __os__\n"
+            "workspace_path = r'" + self.workspace_dir + "'\n"
             "def __setup__():\n"
-            "    import os as __os__\n"
-            "    __os__.chdir(r'" + self.workspace_dir + "')\n"
+            "    __os__.chdir(workspace_path)\n"
             "__setup__()\n"
             "del __setup__\n"
             + font_config_code +
@@ -7868,8 +8362,17 @@ class Main(Star):
         except Exception as e:
             return {"status": "error", "message": f"读取文件失败: {_safe_error_msg(e)}"}
 
+    # 单张图片体积上限：图片本身会作为图像块进入模型，过大的图既慢又贵
+    MAX_READ_IMAGE_BYTES = 4 * 1024 * 1024
+
     async def read_image_tool(self, event: AstrMessageEvent, filename: str = None, **kwargs) -> dict:
-        """读取工作区图片，返回base64"""
+        """查看工作区图片（以图像内容块返回给模型）。
+
+        ⚠️ 绝不要把 base64 字符串写进返回值：返回值会被序列化成 **文本** 进入
+        LLM 上下文，1MB 图片的 base64 约 140 万字符（数十万 token），一张图
+        就能撑爆上下文。正确做法是只回传文件路径，由 run_wyc_tool 统一出口
+        读取并封装为 ImageContent 图像块（与浏览器截图同一条通道）。
+        """
         if not filename:
             filename = kwargs.get('filename') or kwargs.get('file') or kwargs.get('name')
         if not filename:
@@ -7878,31 +8381,29 @@ class Main(Star):
         filepath = self._safe_resolve_path(filename)
         if not filepath:
             return {"status": "error", "message": f"文件不存在或路径不允许访问: {filename}（工作区: {self.workspace_dir}）"}
-        filename = os.path.basename(filepath)
+        basename = os.path.basename(filepath)
         # 检查是否是图片文件
-        ext = os.path.splitext(filename)[1].lower()
+        ext = os.path.splitext(basename)[1].lower()
         image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
         if ext not in image_exts:
             return {"status": "error", "message": f"不支持的图片格式: {ext}，支持: {', '.join(sorted(image_exts))}"}
         try:
-            with open(filepath, 'rb') as f:
-                img_data = f.read()
-            b64 = base64.b64encode(img_data).decode('utf-8')
-            mime = {
-                '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-                '.svg': 'image/svg+xml'
-            }.get(ext, 'image/png')
-            # Truncate if too large (over 1MB)
-            if len(b64) > 1_400_000:
-                return {"status": "error", "message": f"图片过大（{len(img_data)/1024:.0f}KB），无法返回base64"}
-            return {
-                "status": "success",
-                "message": f"图片 {filename} ({len(img_data)/1024:.1f}KB)",
-                "image": f"data:{mime};base64,{b64}"
-            }
-        except Exception as e:
+            size = os.path.getsize(filepath)
+        except OSError as e:
             return {"status": "error", "message": f"读取图片失败: {_safe_error_msg(e)}"}
+        if size > self.MAX_READ_IMAGE_BYTES:
+            return {
+                "status": "error",
+                "message": f"图片过大（{size/1024/1024:.1f}MB，上限 "
+                           f"{self.MAX_READ_IMAGE_BYTES//1024//1024}MB），无法查看。"
+                           f"可先压缩或改用 send_file 直接发送给用户。",
+            }
+        # 只回传路径：由统一出口转成 ImageContent，不经过文本
+        return {
+            "status": "success",
+            "message": f"图片 {basename} ({size/1024:.1f}KB)",
+            "screenshot": filepath,
+        }
 
     async def send_file_tool(self, event: AstrMessageEvent, filename: str = None, target_id: str = None,
                          chat_type: str = "auto", as_image: bool = False, **kwargs) -> dict:

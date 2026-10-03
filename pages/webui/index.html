@@ -328,6 +328,36 @@
         .kw-add-row input { flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 9px; }
         .kw-add-row .btn { flex-shrink: 0; }
 
+        /* ==================== 工具返回文案 ==================== */
+        .nt-item { flex-direction: column; align-items: stretch; gap: 9px; padding: 12px 13px; }
+        .nt-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .nt-name {
+            font-size: 13.5px; font-weight: 600; flex: 1 1 auto;
+            min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .nt-desc {
+            font-size: 11.5px; color: var(--text-3); line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+        .nt-edit { display: flex; flex-direction: column; gap: 6px; }
+        .nt-edit textarea {
+            width: 100%; box-sizing: border-box; min-height: 62px; resize: vertical;
+            font-family: inherit; font-size: 12.5px; line-height: 1.55;
+            padding: 8px 10px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--surface-2);
+            color: var(--text-1); -webkit-appearance: none;
+        }
+        .nt-edit textarea:focus { outline: none; border-color: var(--primary); }
+        .nt-edit textarea::placeholder { color: var(--text-3); }
+        .nt-vars { display: flex; flex-wrap: wrap; gap: 5px; }
+        .nt-var {
+            cursor: pointer; user-select: none;
+            padding: 2px 7px; border-radius: 6px; font-size: 11px;
+            background: var(--surface-2); border: 1px solid var(--border);
+            color: var(--text-2); font-family: inherit;
+        }
+        .nt-var:hover { border-color: var(--primary); color: var(--primary); }
+
         /* ==================== 悬浮保存按钮 ==================== */
         .floating-save {
             position: fixed; right: 22px; bottom: 26px; z-index: 300;
@@ -703,6 +733,11 @@
             .kw-stat { flex: 1 1 100%; text-align: right; }
             .kw-name { white-space: normal; overflow-wrap: anywhere; }
             .kw-add-row input { font-size: 12px; }
+
+            /* 工具返回文案：手机端工具名整行、文本域加大点按区 */
+            .nt-name { white-space: normal; overflow-wrap: anywhere; }
+            .nt-edit textarea { min-height: 74px; font-size: 13px; }
+            .nt-vars .nt-var { min-height: 30px; padding: 5px 10px; }
             /* 悬浮保存按钮：抬高避开底部 tabbar */
             .floating-save {
                 right: 14px;
@@ -830,6 +865,10 @@
                 <button class="nav-btn" data-page="keywords">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5M8 11h6"/></svg>
                     补充工具搜索词
+                </button>
+                <button class="nav-btn" data-page="notes">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg>
+                    工具返回文案
                 </button>
             </nav>
             <div class="sidebar-foot">Wyccotccy &amp; 烬熵Cinder</div>
@@ -1660,6 +1699,39 @@
                     </div>
                 </div>
 
+                <!-- ======== 工具返回文案 ======== -->
+                <div id="notesPage" class="content">
+                    <div class="page-head">
+                        <h1>工具返回文案</h1>
+                        <p>为每个工具追加一段自定义说明，AI 调用后能看到</p>
+                    </div>
+                    <div class="card">
+                        <div class="section-title">返回文案管理</div>
+                        <div class="section-desc">
+                            工具执行完会把结果文字返回给 AI。在这里为某个工具写一段
+                            <strong>补充说明</strong>，它会追加在系统真实结果的后面 ——
+                            <strong>只追加、不覆盖</strong>，AI 仍能看到真实的成功或失败。
+                            例如给 <code>send_like</code> 加上「顺便让对方回赞」。
+                        </div>
+                        <div class="section-desc">
+                            可用变量：<code>{tool}</code> 工具名、<code>{status}</code> 成功/失败、
+                            <code>{result}</code> 系统原始结果文本。
+                        </div>
+                        <div class="filter-bar">
+                            <input type="text" id="ntFilter" placeholder="搜索工具名 / 文案…" style="width:auto;min-width:150px;flex:1;" />
+                            <select id="ntGroup">
+                                <option value="all">全部工具</option>
+                                <option value="command">仅适配器工具</option>
+                                <option value="builtin">仅插件自有工具</option>
+                                <option value="has_note">仅有文案的工具</option>
+                            </select>
+                            <span id="ntStat" class="kw-stat"></span>
+                        </div>
+                        <div id="ntList" class="tool-grid"></div>
+                        <div id="ntStatus" class="status"></div>
+                    </div>
+                </div>
+
                 <div class="sig">Wyccotccy &amp; 烬熵Cinder</div>
             </div>
         </div>
@@ -1715,6 +1787,10 @@
         <button class="tab" data-page="keywords">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5M8 11h6"/></svg>
             搜索词
+        </button>
+        <button class="tab" data-page="notes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg>
+            返回文案
         </button>
     </nav>
 
@@ -1877,7 +1953,7 @@ if (!window.AstrBotPluginPage) {
             takeover: '浏览器接管', memory: '记忆管理', schedule: '定时消息',
             permission: '权限控制',
             adapter: '工具适配器', adapterperm: '适配器权限控制',
-            keywords: '补充工具搜索词'
+            keywords: '补充工具搜索词', notes: '工具返回文案'
         };
 
         function switchPage(page) {
@@ -1898,6 +1974,7 @@ if (!window.AstrBotPluginPage) {
             if (page === 'adapter') loadAdapter();
             if (page === 'adapterperm') loadAdapterPerm();
             if (page === 'keywords') loadKeywords();
+            if (page === 'notes') loadNotes();
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
@@ -2593,10 +2670,18 @@ if (!window.AstrBotPluginPage) {
 
         let kwDirty = false;          // 是否有未保存的改动
 
+        // 悬浮保存按钮由「搜索词」页与「返回文案」页共用，按两边的脏标记统一显隐
+        function updateFloatingSave() {
+            const btn = document.getElementById('floatingSaveBtn');
+            const txt = document.getElementById('floatingSaveText');
+            const dirty = kwDirty || ntDirty;
+            if (btn) btn.classList.toggle('show', dirty);
+            if (txt) txt.textContent = (ntDirty && !kwDirty) ? '保存返回文案' : '保存补充词';
+        }
+
         function kwSetDirty(v) {
             kwDirty = !!v;
-            const btn = document.getElementById('floatingSaveBtn');
-            if (btn) btn.classList.toggle('show', kwDirty);
+            updateFloatingSave();
         }
 
         function kwRenderChips(it) {
@@ -2741,7 +2826,13 @@ if (!window.AstrBotPluginPage) {
         });
 
         // 悬浮保存按钮（改动后出现在右下角，避免忘记保存）
+        // 搜索词页与返回文案页共用，按当前激活页派发
         document.getElementById('floatingSaveBtn').addEventListener('click', async () => {
+            const isNotes = document.getElementById('notesPage').classList.contains('active');
+            if (isNotes) await ntSave(); else await kwSave();
+        });
+
+        async function kwSave() {
             const btn = document.getElementById('floatingSaveBtn');
             const txt = document.getElementById('floatingSaveText');
             btn.disabled = true;
@@ -2765,7 +2856,157 @@ if (!window.AstrBotPluginPage) {
             } finally {
                 btn.disabled = false;
             }
+        }
+
+        // ==================== 工具返回文案 ====================
+        let ntItems = [];
+        let ntKeyword = '';
+        let ntGroupFilter = 'all';
+        let ntDirty = false;
+
+        const NT_VARS = ['{tool}', '{status}', '{result}'];
+
+        function showNtStatus(msg, type) {
+            const el = document.getElementById('ntStatus');
+            el.textContent = msg;
+            el.className = `status show ${type}`;
+            setTimeout(() => el.classList.remove('show'), 3000);
+        }
+
+        function ntSetDirty(v) {
+            ntDirty = !!v;
+            updateFloatingSave();
+        }
+
+        function ntUpdateStat() {
+            const el = document.getElementById('ntStat');
+            if (!el) return;
+            const withNote = ntItems.filter(i => (i.note || '').trim()).length;
+            el.textContent = `共 ${ntItems.length} 个工具 · ${withNote} 个有文案`;
+        }
+
+        async function loadNotes() {
+            try {
+                const res = await bridge.apiGet('tool_notes');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                ntItems = res.items || [];
+                renderNtList();
+                ntUpdateStat();
+                ntSetDirty(false);   // 刚加载 = 无未保存改动
+            } catch (e) {
+                ntItems = [];
+                renderNtList();
+                ntSetDirty(false);
+                showNtStatus('加载失败: ' + e.message, 'error');
+            }
+        }
+
+        function ntRenderEditor(it) {
+            let h = '<div class="nt-edit">';
+            h += '<textarea data-nt-input="' + escapeHtml(it.tool_name) + '" maxlength="1000" ' +
+                 'placeholder="给这个工具写一段补充说明；留空表示不追加">' +
+                 escapeHtml(it.note || '') + '</textarea>';
+            h += '<div class="nt-vars">';
+            h += NT_VARS.map(v => '<button type="button" class="nt-var" data-nt-var="' + v +
+                 '" data-nt-target="' + escapeHtml(it.tool_name) + '">' + v + '</button>').join('');
+            h += '</div></div>';
+            return h;
+        }
+
+        function renderNtList() {
+            const list = document.getElementById('ntList');
+            const kw = ntKeyword.trim().toLowerCase();
+            const visible = ntItems.filter(it => {
+                const note = (it.note || '').trim();
+                if (ntGroupFilter === 'command' && !it.is_command) return false;
+                if (ntGroupFilter === 'builtin' && it.is_command) return false;
+                if (ntGroupFilter === 'has_note' && !note) return false;
+                if (!kw) return true;
+                if (it.tool_name.toLowerCase().includes(kw)) return true;
+                if ((it.description || '').toLowerCase().includes(kw)) return true;
+                if (note.toLowerCase().includes(kw)) return true;
+                return false;
+            });
+            if (!visible.length) {
+                list.innerHTML = '<div class="empty" style="grid-column:1/-1">没有匹配的工具</div>';
+                return;
+            }
+            let html = '';
+            for (const it of visible) {
+                const note = (it.note || '').trim();
+                html += '<div class="tool-item nt-item" data-nt-item="' + escapeHtml(it.tool_name) + '">';
+                html += '<div class="nt-head">';
+                html += '<span class="nt-name" title="' + escapeHtml(it.tool_name) + '">' +
+                        escapeHtml(it.tool_name) + '</span>';
+                if (it.is_command) html += '<span class="adp-badge">适配器</span>';
+                if (note) html += '<span class="adp-badge ok">已设置</span>';
+                html += '</div>';
+                if (it.description) html += '<div class="nt-desc">' + escapeHtml(it.description) + '</div>';
+                html += ntRenderEditor(it);
+                html += '</div>';
+            }
+            list.innerHTML = html;
+        }
+
+        // 输入即记到内存，改动后浮出保存按钮
+        document.getElementById('ntList').addEventListener('input', e => {
+            const ta = e.target.closest('[data-nt-input]');
+            if (!ta) return;
+            const it = ntItems.find(x => x.tool_name === ta.dataset.ntInput);
+            if (!it) return;
+            it.note = ta.value;
+            ntSetDirty(true);
         });
+        // 点击变量按钮：在光标处插入变量名
+        document.getElementById('ntList').addEventListener('click', e => {
+            const vb = e.target.closest('[data-nt-var]');
+            if (!vb) return;
+            e.preventDefault();
+            const tn = vb.dataset.ntTarget;
+            const it = ntItems.find(x => x.tool_name === tn);
+            const ta = document.querySelector('[data-nt-input="' + CSS.escape(tn) + '"]');
+            if (!it || !ta) return;
+            const v = vb.dataset.ntVar;
+            const start = ta.selectionStart == null ? ta.value.length : ta.selectionStart;
+            const end = ta.selectionEnd == null ? ta.value.length : ta.selectionEnd;
+            ta.value = ta.value.slice(0, start) + v + ta.value.slice(end);
+            it.note = ta.value;
+            ta.focus();
+            const pos = start + v.length;
+            try { ta.setSelectionRange(pos, pos); } catch (_) {}
+            ntSetDirty(true);
+        });
+        document.getElementById('ntFilter').addEventListener('input', e => {
+            ntKeyword = e.target.value;
+            renderNtList();
+        });
+        document.getElementById('ntGroup').addEventListener('change', e => {
+            ntGroupFilter = e.target.value;
+            renderNtList();
+        });
+
+        async function ntSave() {
+            const btn = document.getElementById('floatingSaveBtn');
+            const txt = document.getElementById('floatingSaveText');
+            btn.disabled = true;
+            txt.textContent = '保存中...';
+            try {
+                const payload = {};
+                for (const it of ntItems) payload[it.tool_name] = it.note || '';
+                const res = await bridge.apiPost('tool_notes_save', { notes: payload });
+                if (!res.success) throw new Error(res.error || '保存失败');
+                ntSetDirty(false);
+                txt.textContent = '已保存';
+                showNtStatus(`已保存：${res.saved} 个工具有文案，清除 ${res.cleared} 个`, 'success');
+                await loadNotes();
+                setTimeout(() => { txt.textContent = '保存返回文案'; }, 1600);
+            } catch (e) {
+                txt.textContent = '保存失败，点击重试';
+                showNtStatus(e.message, 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
 
         async function loadPermission() {
             try {
