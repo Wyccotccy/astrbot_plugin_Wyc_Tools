@@ -107,6 +107,10 @@ CONFIG_SAVE_WHITELIST = {
     # 浏览器接管（v5.4.0）
     "takeover_max_seconds", "takeover_idle_seconds",
     "takeover_jpeg_quality", "takeover_max_width", "takeover_auto_detected",
+    # 自定义 Python 函数工具（v5.9.0）
+    "custom_tools_enabled", "custom_tools_allow_global",
+    "custom_tools_max_concurrency", "custom_tools_timeout_max",
+    "custom_tools_webui_admins",
 }
 
 
@@ -180,6 +184,30 @@ ADAPTER_TOOL_PREFIX = "Wyc_assistive_tool_"
 # 均要求工具名匹配 ^[a-zA-Z0-9_-]+$ 且 ≤64 字符，超长会被 provider 直接 400
 ADAPTER_TOOL_NAME_MAX = 64
 
+
+# ======================================================
+# 自定义 Python 函数工具（v5.9.0）
+# - 用户在 WebUI 里写 Python 函数 → 注册为 AI 可调用的工具
+# - 代码在**隔离子进程**中执行（-I -B + rlimit + env 白名单 + 超时 kill）
+# - 状态存独立文件 custom_tools.json（动态 key，不能进 _conf_schema，同 §14.1 的教训）
+# ======================================================
+CUSTOM_TOOL_PREFIX = "Wyc_custom_tool_"
+CUSTOM_TOOL_NAME_MAX = 64
+CUSTOM_TOOL_ENTRY_DEFAULT = "main"
+CUSTOM_TOOL_TIMEOUT_DEFAULT = 30
+CUSTOM_TOOL_TIMEOUT_MAX = 120
+CUSTOM_TOOL_CODE_MAX_BYTES = 256 * 1024     # 单份源码上限
+CUSTOM_TOOL_MAX_COUNT = 50                  # 工具总数上限
+
+# 静态检测的禁用模块集合。
+# ⚠️ 与 core/custom_runner.py 的 BANNED_MODULES 必须保持一致：
+# 后者在 `-I` 隔离子进程里运行，无法 import 本模块，只能各自维护一份。
+# 启动时 _check_runner_banned_sync() 会比对并告警（不影响运行，宿主侧检测仍是第一道防线）。
+_BANNED_MODULES = frozenset({
+    "subprocess", "os", "sys", "shutil", "ctypes", "multiprocessing",
+    "socket", "http", "ftplib", "smtplib", "pty", "signal", "resource",
+    "importlib", "pickle", "marshal", "builtins", "gc",
+})
 
 def _normalize_ip_literal(hostname: str) -> Optional[str]:
     """把十进制/八进制/十六进制等非标准 IP 写法归一化成标准点分十进制。
@@ -1427,12 +1455,34 @@ class Main(Star):
         self._tool_notes = self._load_tool_notes()
         # 所有工具的 enable_* 开关集合（用于 WebUI 保存白名单，避免开关被丢弃）
         self._tool_enable_keys = {f"enable_{name}" for name in self._tool_registry}
+        # 自定义 Python 函数工具（v5.9.0）
+        self._custom_tools: Dict[str, dict] = {}
+        try:
+            self._custom_exec_sem = asyncio.Semaphore(
+                max(1, int(self.config.get("custom_tools_max_concurrency", 3) or 3))
+            )
+        except (TypeError, ValueError):
+            self._custom_exec_sem = asyncio.Semaphore(3)
         # 工具适配器：按勾选状态注册命令工具（此时后加载的插件尚未注册，
         # 其命令需在 WebUI 点「刷新枚举」或保存勾选后才会出现）
         try:
             self._rebuild_adapter_tools()
         except Exception as e:
             logger.warning(f"[QZoneTools] 工具适配器初始化失败: {_safe_error_msg(e)}")
+        try:
+            self._rebuild_custom_tools()
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 自定义工具初始化失败: {_safe_error_msg(e)}")
+        # ★ 动态工具（适配器 / 自定义）注册后必须重载开关：
+        #   self.tool_enabled 在第 1420 行构造，那时 _tool_registry 还没建，
+        #   _load_tool_enabled_flags 里的动态遍历看不到任何条目 —— 不在这里补一次，
+        #   动态工具的 enable_xxx=false 配置就永远不生效（既有隐患，v5.9.0 修复）。
+        try:
+            self.tool_enabled = self._load_tool_enabled_flags()
+        except Exception as e:
+            logger.debug(f"[QZoneTools] 重载工具开关失败: {_safe_error_msg(e)}")
+        # 禁用模块名单一致性自检（仅告警，不阻断启动）
+        self._check_runner_banned_sync()
         self.enable_human_typing = self.config.get("enable_human_typing", False)
         self.typing_idle_threshold = self.config.get("typing_idle_threshold", 900)
         self.typing_initial_delay_min = self.config.get("typing_initial_delay_min", 5)
@@ -1524,6 +1574,16 @@ class Main(Star):
             config_key = f"enable_{tool_name}"
             if config_key in self.config:
                 default_enabled[tool_name] = self.config.get(config_key)
+        # 动态注册的工具（适配器 / 自定义）：把配置里显式关闭的也纳入。
+        # 修复既有隐患：此前只遍历硬编码的 default_enabled，导致适配器工具的
+        # `enable_xxx=false` 重启后读不到、开关失效（自定义工具会继承同一问题）。
+        try:
+            for tool_name in list(self._tool_registry.keys()):
+                config_key = f"enable_{tool_name}"
+                if config_key in self.config:
+                    default_enabled[tool_name] = self.config.get(config_key)
+        except Exception:
+            pass
         return default_enabled
 
     def _get_tool_permission(self, name: str) -> str:
@@ -1536,6 +1596,18 @@ class Main(Star):
         `items` 为空的 object 类型的子键全部当作"未知配置"删除，导致保存在主配置
         里的 tool_permissions 在重载/重启后被清空（issue #13）。
         """
+        tool_perms = self._tool_permissions if isinstance(self._tool_permissions, dict) else {}
+        explicit = tool_perms.get(name)
+        if explicit not in PERMISSION_LEVELS:
+            explicit = None
+
+        # ---------- 「禁用」优先：收紧不受硬下限约束 ----------
+        # 硬下限的本意是「不许**放宽**」（防越权）。若把「收紧」也一起挡掉，
+        # 就会出现「在权限页点了禁用却依然生效」的静默失效 —— 那是缺陷不是保护。
+        # 因此 disabled 先于硬下限判定。
+        if explicit == "disabled":
+            return "disabled"
+
         # ---------- 适配器高危工具硬下限（安全红线，不可被降档） ----------
         # 源命令带 @filter.permission_type(ADMIN) 的（/ban、/kick、/退群…），
         # 桥接后**必须**保持 admin 档：即便有人在配置里把它改成 global/groupadmin，
@@ -1544,11 +1616,17 @@ class Main(Star):
             meta = self._tool_registry.get(name)
             if isinstance(meta, dict) and meta.get("perm_default") == "admin":
                 return "admin"
-        tool_perms = self._tool_permissions if isinstance(self._tool_permissions, dict) else {}
-        if name in tool_perms:
-            perm = tool_perms.get(name)
-            if perm in PERMISSION_LEVELS:
-                return perm
+        # ---------- 自定义工具硬下限（安全红线） ----------
+        # 用户写的代码在插件进程的隔离子进程里执行，能力边界约等于 run_python_code。
+        # 因此默认 admin 档，且**不可降档** —— 除非管理员显式打开
+        # custom_tools_allow_global 开关（默认 false），明确知晓风险。
+        if name.startswith(CUSTOM_TOOL_PREFIX):
+            meta = self._tool_registry.get(name)
+            if isinstance(meta, dict) and meta.get("perm_default") == "admin":
+                if not self.config.get("custom_tools_allow_global", False):
+                    return "admin"
+        if explicit is not None:
+            return explicit
         if name in SENSITIVE_TOOLS:
             return "admin"
         return "global"
@@ -2377,6 +2455,495 @@ class Main(Star):
             "status": "success",
             "message": f"✅ 命令 /{command} 执行结果：\n{msg}",
         }
+
+    # ==================== 自定义 Python 函数工具（v5.9.0） ====================
+    # 用户写的 Python 函数 → 注册为 AI 可调用的工具。
+    # 与工具适配器同构（独立文件持久化 + 幂等重建 + 硬下限权限），
+    # 但代码由**子进程**执行（见 core/custom_runner.py 的协议说明）。
+
+    def _custom_tools_file(self) -> str:
+        return os.path.join(self.data_dir, "custom_tools.json")
+
+    def _load_custom_tools(self) -> Dict[str, dict]:
+        """载入自定义工具表 {tool_name: record}。
+
+        逐字段类型校验，非法条目直接跳过 —— **绝不抛异常**：
+        用户手工编辑过这个文件时，一条坏数据不能导致插件起不来。
+        """
+        path = self._custom_tools_file()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"[QZoneTools] 读取 custom_tools.json 失败: {_safe_error_msg(e)}")
+            return {}
+
+        raw = data.get("tools", {}) if isinstance(data, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+
+        out: Dict[str, dict] = {}
+        for name, rec in raw.items():
+            if not isinstance(name, str) or not name.startswith(CUSTOM_TOOL_PREFIX):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            code = rec.get("code")
+            if not isinstance(code, str) or not code.strip():
+                continue
+            if len(code.encode("utf-8")) > CUSTOM_TOOL_CODE_MAX_BYTES:
+                logger.warning(f"[QZoneTools] 自定义工具 {name} 源码超过上限，已跳过")
+                continue
+            params = rec.get("parameters")
+            if not isinstance(params, dict) or params.get("type") != "object":
+                params = {"type": "object", "properties": {}, "required": []}
+            kws = rec.get("keywords")
+            if not isinstance(kws, list):
+                kws = []
+            perm = rec.get("permission")
+            if perm not in PERMISSION_LEVELS:
+                perm = "admin"
+            try:
+                timeout = int(rec.get("timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT)
+            except (TypeError, ValueError):
+                timeout = CUSTOM_TOOL_TIMEOUT_DEFAULT
+            timeout = max(5, min(timeout, CUSTOM_TOOL_TIMEOUT_MAX))
+
+            out[name] = {
+                "tool_name": name,
+                "display_name": str(rec.get("display_name") or name)[:80],
+                "description": str(rec.get("description") or "")[:2000],
+                "parameters": params,
+                "keywords": [str(k).strip() for k in kws if str(k).strip()][:60],
+                "code": code,
+                "entry": str(rec.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT)[:64],
+                "permission": perm,
+                "enabled": bool(rec.get("enabled", True)),
+                "timeout": timeout,
+                "source": str(rec.get("source") or "manual")[:16],
+                "created_at": int(rec.get("created_at") or 0),
+                "updated_at": int(rec.get("updated_at") or 0),
+                "last_run": rec.get("last_run") if isinstance(rec.get("last_run"), dict) else None,
+            }
+        return out
+
+    def _save_custom_tools(self, tools: Dict[str, dict]) -> bool:
+        """原子写入自定义工具表（tmp + fsync + replace，同 tool_permissions 模式）。"""
+        path = self._custom_tools_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "tools": tools}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True
+        except Exception as e:
+            logger.error(f"[QZoneTools] 写入 custom_tools.json 失败: {_safe_error_msg(e)}")
+            return False
+
+    def _custom_build_tool_name(self, display_name: str) -> str:
+        """把用户填的名称转成合法工具名（纯 ASCII 规范化 / 中文转拼音）。
+
+        与适配器的 _adapter_build_tool_name 同策略：provider 要求工具名匹配
+        ^[a-zA-Z0-9_-]+$ 且 ≤64 字符。
+        """
+        raw = (display_name or "").strip()
+        slug = ""
+        if raw:
+            try:
+                if all(ord(c) < 128 for c in raw):
+                    slug = re.sub(r"[^a-zA-Z0-9]+", "_", raw.lower()).strip("_")
+                else:
+                    from pypinyin import lazy_pinyin
+                    parts = lazy_pinyin(raw)
+                    slug = re.sub(r"[^a-zA-Z0-9]+", "_", "_".join(parts).lower()).strip("_")
+            except Exception:
+                slug = re.sub(r"[^a-zA-Z0-9]+", "_", raw.lower()).strip("_")
+        if not slug:
+            slug = "tool"
+        name = f"{CUSTOM_TOOL_PREFIX}{slug}"
+        if len(name) > CUSTOM_TOOL_NAME_MAX:
+            import hashlib as _h
+            keep = CUSTOM_TOOL_NAME_MAX - len(CUSTOM_TOOL_PREFIX) - 5
+            name = f"{CUSTOM_TOOL_PREFIX}{slug[:keep].rstrip('_')}_{_h.md5(raw.encode('utf-8')).hexdigest()[:4]}"
+        return name
+
+    def _validate_custom_record(self, rec: dict) -> Optional[str]:
+        """保存前校验，返回中文错误文案；通过则返回 None。"""
+        if not isinstance(rec, dict):
+            return "数据格式错误"
+        name = str(rec.get("display_name") or "").strip()
+        if not name:
+            return "请填写工具名称"
+        if len(name) > 80:
+            return "工具名称过长（最多 80 字符）"
+        desc = str(rec.get("description") or "").strip()
+        if not desc:
+            return "请填写工具描述（AI 靠它判断何时调用该工具）"
+        if len(desc) > 2000:
+            return "工具描述过长（最多 2000 字符）"
+        code = rec.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return "请填写代码"
+        if len(code.encode("utf-8")) > CUSTOM_TOOL_CODE_MAX_BYTES:
+            return f"代码过长（上限 {CUSTOM_TOOL_CODE_MAX_BYTES // 1024} KB）"
+        entry = str(rec.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT).strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", entry):
+            return f"入口函数名不合法：{entry}（只能是字母/数字/下划线，且不以数字开头）"
+        perm = rec.get("permission")
+        if perm not in PERMISSION_LEVELS:
+            return f"权限档位不合法：{perm}"
+        if perm == "global" and not self.config.get("custom_tools_allow_global", False):
+            return ("「全局」档需要先在插件配置里开启「允许把自定义工具设为全局」。"
+                    "自定义工具可执行任意 Python，默认只允许超管使用。")
+        try:
+            timeout = int(rec.get("timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            return "超时时间必须是数字"
+        if not (5 <= timeout <= CUSTOM_TOOL_TIMEOUT_MAX):
+            return f"超时时间需在 5–{CUSTOM_TOOL_TIMEOUT_MAX} 秒之间"
+        kws = rec.get("keywords")
+        if kws is not None and not isinstance(kws, list):
+            return "搜索词格式错误（应为数组）"
+        if isinstance(kws, list) and len(kws) > 60:
+            return "搜索词过多（最多 60 个）"
+        return None
+
+    def _custom_runner_path(self) -> str:
+        """子进程执行器路径（插件包内只读资源）。"""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "core", "custom_runner.py")
+
+    def _custom_font_path(self) -> str:
+        """返回插件自带的中文字体路径（不存在则空串）。
+
+        对齐 run_python_code 的既有行为：那里会自动给 matplotlib 注册该字体，
+        否则用户画图时中文全是方块。自定义工具走子进程，字体配置改由执行器完成，
+        这里只负责把路径传过去。
+        """
+        try:
+            p = os.path.join(self.data_dir, "fonts", "NotoSansCJK-Regular.ttc")
+            return p if os.path.isfile(p) else ""
+        except Exception:
+            return ""
+
+    def _custom_runner_env(self) -> dict:
+        """子进程环境变量白名单 —— 不继承任何敏感配置（密钥/代理/token）。
+
+        与 _run_python_async 保持同一套，便于统一审计。
+        """
+        return {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": self.workspace_dir,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PYTHONIOENCODING": "utf-8",
+            "MPLBACKEND": "Agg",
+            "TMPDIR": self.workspace_dir,
+        }
+
+    @staticmethod
+    def _custom_limits(timeout: int):
+        """返回 preexec_fn：子进程资源限制（仅 Unix 生效）。
+
+        与 _run_python_async 的 _limits 同数值：CPU / 文件大小 / 进程数 / 地址空间。
+        """
+        def _limits():
+            try:
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 5))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+                try:
+                    mem = 2 * 1024 * 1024 * 1024
+                    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                except (ValueError, OSError):
+                    pass
+            except Exception:
+                pass
+        return _limits
+
+    def _check_runner_banned_sync(self) -> None:
+        """启动自检：执行器的 BANNED_MODULES 与宿主侧是否一致。
+
+        两者必须各自维护一份（子进程 `-I` 隔离，无法 import 本模块），
+        很容易改了这边忘了那边 —— 那种情况下 AI 生成的代码会「必然被拒」，
+        或在子进程里绕过宿主没禁的模块。这里只告警，不阻断启动。
+        """
+        try:
+            path = self._custom_runner_path()
+            if not os.path.isfile(path):
+                logger.warning(f"[QZoneTools] 自定义工具执行器缺失: {path}")
+                return
+            import ast as _ast
+            with open(path, encoding="utf-8") as f:
+                tree = _ast.parse(f.read())
+            runner_set = None
+            for node in tree.body:
+                if isinstance(node, _ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, _ast.Name) and t.id == "BANNED_MODULES":
+                            try:
+                                runner_set = set(_ast.literal_eval(node.value))
+                            except Exception:
+                                pass
+            if runner_set is None:
+                logger.warning("[QZoneTools] 无法从执行器解析 BANNED_MODULES，跳过一致性自检")
+                return
+            host_set = set(_BANNED_MODULES)
+            only_host = host_set - runner_set
+            only_runner = runner_set - host_set
+            if only_host or only_runner:
+                logger.warning(
+                    "[QZoneTools] ⚠️ 禁用模块集合不一致（main._BANNED_MODULES vs "
+                    f"custom_runner.BANNED_MODULES）：仅宿主侧={sorted(only_host)} "
+                    f"仅执行器侧={sorted(only_runner)}。请同步两份名单。"
+                )
+            else:
+                logger.info(f"[QZoneTools] 自定义工具禁用模块自检通过（{len(host_set)} 项一致）")
+        except Exception as e:
+            logger.debug(f"[QZoneTools] 禁用模块自检跳过: {_safe_error_msg(e)}")
+
+    def _make_custom_handler(self, tool_name: str):
+        """返回一个普通协程闭包，接入 run_wyc_tool 的统一出口。
+
+        ⚠️ 必须是普通协程：run_wyc_tool 用 `await handler(...)` 调用，
+        async generator 会抛 TypeError（§18.2 的教训）。
+        """
+        async def _custom_handler(event: AstrMessageEvent, **kwargs) -> dict:
+            return await self._execute_custom_tool(event, tool_name, kwargs)
+        return _custom_handler
+
+    def _unregister_custom_tools(self) -> None:
+        """把已注册的自定义工具从 registry 摘掉（关闭总开关时用）。"""
+        for name in [n for n in self._tool_registry if n.startswith(CUSTOM_TOOL_PREFIX)]:
+            self._tool_registry.pop(name, None)
+            self._tool_enable_keys.discard(f"enable_{name}")
+            self.tool_enabled.pop(name, None)
+
+    def _rebuild_custom_tools(self) -> int:
+        """按 enabled 状态重建 _tool_registry 里的自定义工具（幂等，先清后建）。
+
+        返回成功注册的数量。与 _rebuild_adapter_tools 同构。
+        总开关关闭时清空全部自定义工具（AI 看不到）。
+        """
+        self._unregister_custom_tools()
+        if not self.config.get("custom_tools_enabled", False):
+            return 0
+
+        recs = self._load_custom_tools()
+        self._custom_tools = recs
+        count = 0
+        for tool_name, rec in recs.items():
+            if not rec.get("enabled", True):
+                continue
+            try:
+                self._tool_registry[tool_name] = {
+                    "name": tool_name,
+                    "description": rec["description"],
+                    "parameters": rec["parameters"],
+                    "keywords": list(rec.get("keywords") or []),
+                    "handler": self._make_custom_handler(tool_name),
+                    "is_custom": True,
+                    "perm_default": rec.get("permission", "admin"),
+                    "custom_timeout": rec.get("timeout", CUSTOM_TOOL_TIMEOUT_DEFAULT),
+                }
+                self._tool_enable_keys.add(f"enable_{tool_name}")
+                count += 1
+            except Exception as e:
+                logger.warning(f"[QZoneTools] 注册自定义工具 {tool_name} 失败: {_safe_error_msg(e)}")
+        if count:
+            logger.info(f"[QZoneTools] 自定义工具：已注册 {count} 个")
+        return count
+
+    async def _custom_run_subprocess(self, req: dict, timeout: int) -> dict:
+        """启动执行器子进程，返回协议结果 dict。
+
+        与 _run_python_async 同一套约束：`-I` 隔离、env 白名单、rlimit、超时 kill。
+        区别只是 stdin/stdout 走 JSON 协议而非临时脚本 + 裸 stdout。
+        """
+        runner = self._custom_runner_path()
+        if not os.path.isfile(runner):
+            return {"status": "error", "message": f"执行器文件缺失：{runner}"}
+
+        payload = json.dumps(req, ensure_ascii=False)
+        proc_kwargs = dict(
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.workspace_dir,
+            env=self._custom_runner_env(),
+        )
+        # preexec_fn 仅 Unix 支持；不支持时降级（仍受 timeout 保护）
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-B", runner,
+                preexec_fn=self._custom_limits(timeout), **proc_kwargs,
+            )
+        except (NotImplementedError, ValueError, OSError):
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-B", runner, **proc_kwargs,
+            )
+
+        try:
+            out_b, err_b = await asyncio.wait_for(
+                proc.communicate(payload.encode("utf-8")), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                pass
+            return {"status": "error",
+                    "message": f"⏱️ 执行超时（超过 {timeout} 秒），已强制终止。"}
+
+        out = out_b.decode("utf-8", errors="replace")
+        err = err_b.decode("utf-8", errors="replace")
+
+        # 取最后一行可解析的 stdout 作为协议结果（用户 print 已被重定向到 stderr，
+        # 理论上 stdout 只有一行；倒序扫描是防御性的，避免任何意外输出破坏解析）
+        result = None
+        for line in reversed([l for l in out.split("\n") if l.strip()]):
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                result = parsed
+                break
+
+        if result is None:
+            tail = (err or out or "").strip()[-600:]
+            return {"status": "error",
+                    "message": f"执行器未返回有效结果（退出码 {proc.returncode}）\n{tail}"}
+
+        if err.strip():
+            result["_stderr"] = err.strip()[:2000]
+        return result
+
+    def _custom_effective_timeout(self, meta: dict) -> int:
+        """计算实际生效的超时：工具设置 ∩ 配置上限 ∩ 硬上限 ∩ 框架超时-12。
+
+        最后一项最关键：框架 astr_agent_tool_exec 对每次工具调用套
+        `asyncio.wait_for(..., tool_call_timeout)`，超了会被拦腰砍断，
+        连结果序列化都做不完（§18.2）。
+        """
+        try:
+            want = int(meta.get("custom_timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            want = CUSTOM_TOOL_TIMEOUT_DEFAULT
+        try:
+            cfg_max = int(self.config.get("custom_tools_timeout_max",
+                                          CUSTOM_TOOL_TIMEOUT_MAX) or CUSTOM_TOOL_TIMEOUT_MAX)
+        except (TypeError, ValueError):
+            cfg_max = CUSTOM_TOOL_TIMEOUT_MAX
+        fw = self._adapter_framework_timeout()
+        return max(5, min(want, cfg_max, CUSTOM_TOOL_TIMEOUT_MAX, max(5, fw - 12)))
+
+    async def _execute_custom_tool(self, event: AstrMessageEvent, tool_name: str,
+                                   args_dict: dict) -> dict:
+        """执行自定义工具（run_wyc_tool 的自定义工具分支）。"""
+        meta = self._tool_registry.get(tool_name) or {}
+        rec = (self._custom_tools or {}).get(tool_name) or {}
+        code = rec.get("code") or ""
+        if not code.strip():
+            return {"status": "error",
+                    "message": f"自定义工具 {tool_name} 缺少代码，请在 WebUI 重新保存。"}
+
+        entry = rec.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT
+        timeout = self._custom_effective_timeout(meta)
+        try:
+            max_chars = int(self.config.get("max_output_chars", 8000) or 8000)
+        except (TypeError, ValueError):
+            max_chars = 8000
+
+        req = {
+            "protocol": 1,
+            "code": code,
+            "entry": entry,
+            "args": args_dict or {},
+            "workspace": self.workspace_dir,
+            "max_output_chars": max_chars,
+            "introspect_only": False,
+            "font_path": self._custom_font_path(),
+        }
+
+        sem = getattr(self, "_custom_exec_sem", None)
+        started = time.time()
+        try:
+            if sem is not None:
+                async with sem:
+                    res = await self._custom_run_subprocess(req, timeout)
+            else:
+                res = await self._custom_run_subprocess(req, timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[QZoneTools] 自定义工具 {tool_name} 执行异常: {_safe_error_msg(e)}",
+                         exc_info=True)
+            return {"status": "error", "message": f"执行失败: {_safe_error_msg(e)}"}
+
+        elapsed_ms = int((time.time() - started) * 1000)
+        self._record_custom_run(tool_name, res.get("status"), elapsed_ms)
+
+        status = res.get("status")
+        if status not in ("success", "error"):
+            status = "error" if res.get("_stderr") else "success"
+        message = res.get("message")
+        if not isinstance(message, str):
+            message = str(message or "")
+        if res.get("_stderr"):
+            message = f"{message}\n\n[stderr]\n{res['_stderr']}"
+
+        out = {"status": status, "message": message}
+        # screenshot 只接受路径（执行器已校验存在性与非 base64），
+        # 交给 run_wyc_tool 统一出口读成 ImageContent —— 与浏览器截图同一条通道
+        shot = res.get("screenshot")
+        if isinstance(shot, str) and shot:
+            out["screenshot"] = shot
+        return out
+
+    def _record_custom_run(self, tool_name: str, status, elapsed_ms: int) -> None:
+        """记录最近一次执行摘要（供列表页展示）。尽力而为，失败不影响返回。"""
+        try:
+            rec = (self._custom_tools or {}).get(tool_name)
+            if not isinstance(rec, dict):
+                return
+            rec["last_run"] = {
+                "at": int(time.time()),
+                "status": "success" if status == "success" else "error",
+                "ms": int(elapsed_ms),
+            }
+            self._save_custom_tools(self._custom_tools)
+        except Exception as e:
+            logger.debug(f"[QZoneTools] 记录自定义工具运行摘要失败: {_safe_error_msg(e)}")
+
+    async def _introspect_custom_code(self, code: str, entry: str = None) -> dict:
+        """在子进程里推导参数 schema（保存前校验 + 编辑时预览）。
+
+        返回执行器的协议结果；调用方据此判断代码能否加载、入口函数是否存在。
+        """
+        req = {
+            "protocol": 1,
+            "code": code or "",
+            "entry": entry or CUSTOM_TOOL_ENTRY_DEFAULT,
+            "args": {},
+            "workspace": self.workspace_dir,
+            "introspect_only": True,
+            "font_path": self._custom_font_path(),
+        }
+        try:
+            return await self._custom_run_subprocess(req, 20)
+        except Exception as e:
+            return {"status": "error", "message": f"校验失败: {_safe_error_msg(e)}"}
 
     def _get_available_tools(self, event: AstrMessageEvent = None) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
@@ -4587,7 +5154,10 @@ class Main(Star):
             # 防御：若某个 handler 误写成 async generator，直接 await 会抛
             # TypeError: object async_generator can't be used in 'await' expression。
             # 这里主动探测并给出可诊断的错误，而不是抛到底层。
-            if available_tools[tool_name].get("is_command"):
+            if available_tools[tool_name].get("is_custom"):
+                # 自定义 Python 函数工具：子进程隔离执行（-I + rlimit + 超时 kill）
+                result = await self._execute_custom_tool(event, tool_name, args_dict)
+            elif available_tools[tool_name].get("is_command"):
                 # 适配器命令工具：走专用执行路径（影子事件 + 消费生成器/协程）
                 result = await self._execute_adapter_command(event, tool_name, args_dict)
             elif inspect.isasyncgenfunction(handler):
@@ -5115,6 +5685,13 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/tool_keywords_save", self.handle_save_tool_keywords, ["POST"], "保存补充搜索词")
             self.context.register_web_api(f"/{PLUGIN_NAME}/tool_notes", self.handle_get_tool_notes, ["GET"], "获取工具返回文案")
             self.context.register_web_api(f"/{PLUGIN_NAME}/tool_notes_save", self.handle_save_tool_notes, ["POST"], "保存工具返回文案")
+            # 自定义 Python 函数工具（v5.9.0）
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tools_list", self.handle_custom_tools_list, ["GET"], "自定义工具列表")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tool_get", self.handle_custom_tool_get, ["GET"], "自定义工具详情")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tool_introspect", self.handle_custom_tool_introspect, ["POST"], "推导自定义工具参数表")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tool_save", self.handle_custom_tool_save, ["POST"], "保存自定义工具")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tool_delete", self.handle_custom_tool_delete, ["POST"], "删除自定义工具")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/custom_tool_test", self.handle_custom_tool_test, ["POST"], "试运行自定义工具")
             logger.info("[QZoneTools] WebUI API 已注册")
         except Exception as e:
             logger.error(f"[QZoneTools] 注册失败: {e}")
@@ -5329,6 +5906,260 @@ class Main(Star):
             logger.error(f"[WebUI] 保存工具返回文案失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
+    # ==================== 自定义 Python 函数工具 API（v5.9.0） ====================
+
+    async def handle_custom_tools_list(self):
+        """列出全部自定义工具（含注册状态、上次运行摘要）。"""
+        try:
+            self._rebuild_custom_tools()   # 幂等自愈，对齐 handle_adapter_list 的做法
+            recs = self._custom_tools if isinstance(self._custom_tools, dict) else {}
+            items = []
+            for name, rec in recs.items():
+                items.append({
+                    "tool_name": name,
+                    "display_name": rec.get("display_name") or name,
+                    "description": rec.get("description") or "",
+                    "keywords": list(rec.get("keywords") or []),
+                    "permission": rec.get("permission") or "admin",
+                    "enabled": bool(rec.get("enabled", True)),
+                    "timeout": rec.get("timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT,
+                    "source": rec.get("source") or "manual",
+                    "registered": name in self._tool_registry,
+                    "last_run": rec.get("last_run"),
+                    "updated_at": rec.get("updated_at") or 0,
+                })
+            items.sort(key=lambda x: (-(x["updated_at"] or 0), x["tool_name"]))
+            return jsonify({
+                "success": True,
+                "items": items,
+                "enabled": bool(self.config.get("custom_tools_enabled", False)),
+                "allow_global": bool(self.config.get("custom_tools_allow_global", False)),
+                "max_count": CUSTOM_TOOL_MAX_COUNT,
+                "timeout_max": CUSTOM_TOOL_TIMEOUT_MAX,
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 获取自定义工具列表失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_custom_tool_get(self):
+        """取单个自定义工具的完整内容（含代码）。"""
+        try:
+            name = str(request.args.get("tool_name") or "").strip()
+            rec = (self._custom_tools or {}).get(name)
+            if not isinstance(rec, dict):
+                return jsonify({"success": False, "error": f"工具不存在：{name}"})
+            out = dict(rec)
+            out["registered"] = name in self._tool_registry
+            return jsonify({"success": True, "tool": out})
+        except Exception as e:
+            logger.error(f"[WebUI] 获取自定义工具失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_custom_tool_introspect(self):
+        """在子进程里推导参数表（编辑时实时预览；不写盘、不注册）。"""
+        try:
+            data = await request.get_json()
+            code = data.get("code") if isinstance(data, dict) else None
+            if not isinstance(code, str) or not code.strip():
+                return jsonify({"success": False, "error": "缺少 code"})
+            if len(code.encode("utf-8")) > CUSTOM_TOOL_CODE_MAX_BYTES:
+                return jsonify({"success": False, "error": "代码过长"})
+            entry = str(data.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT).strip()
+            res = await self._introspect_custom_code(code, entry)
+            if res.get("status") != "success":
+                return jsonify({"success": False, "error": res.get("message") or "校验失败"})
+            return jsonify({
+                "success": True,
+                "entry": res.get("entry") or entry,
+                "schema": res.get("schema") or {},
+                "params": res.get("params") or [],
+                "description": res.get("description") or "",
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 推导参数表失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_custom_tool_save(self):
+        """新建/更新自定义工具：校验 → 静态检测 → 子进程试加载 → 落盘 → 重建注册表。"""
+        try:
+            if not self._webui_is_admin():
+                return jsonify({"success": False, "error": "当前 WebUI 用户无权修改自定义工具"})
+            if not self.config.get("custom_tools_enabled", False):
+                return jsonify({"success": False,
+                                "error": "自定义工具功能未启用，请先在插件配置中开启「启用自定义 Python 函数工具」"})
+
+            data = await request.get_json()
+            rec = data.get("tool") if isinstance(data, dict) else None
+            if not isinstance(rec, dict):
+                return jsonify({"success": False, "error": "格式错误：tool 必须是对象"})
+
+            # 1) 结构校验
+            err = self._validate_custom_record(rec)
+            if err:
+                return jsonify({"success": False, "error": err})
+
+            code = rec["code"]
+            entry = str(rec.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT).strip()
+
+            # 2) 静态安全检测（复用既有双层检测：AST + 正则）
+            banned = self._check_banned_patterns(code)
+            if banned:
+                return jsonify({"success": False,
+                                "error": f"代码包含禁止的内容：{banned}"})
+
+            # 3) 子进程试加载（能 exec、入口函数存在、schema 可推导）
+            #    —— 把「存进去却跑不起来」挡在保存这一刻，而不是等 AI 调用时才失败
+            intro = await self._introspect_custom_code(code, entry)
+            if intro.get("status") != "success":
+                return jsonify({"success": False,
+                                "error": intro.get("message") or "代码校验失败"})
+            entry = intro.get("entry") or entry
+            schema = intro.get("schema") or {"type": "object", "properties": {}, "required": []}
+
+            # 4) 计算工具名（新建时生成；更新时沿用原名，允许改名）
+            recs = dict(self._custom_tools or {})
+            old_name = str(rec.get("tool_name") or "").strip()
+            if old_name and old_name in recs:
+                tool_name = old_name
+                created_at = recs[old_name].get("created_at") or int(time.time())
+            else:
+                tool_name = self._custom_build_tool_name(rec["display_name"])
+                # 命名冲突兜底（同名 / 不同名转拼音后相同）
+                if tool_name in recs or tool_name in self._tool_registry:
+                    import hashlib as _h
+                    suffix = _h.md5(f"{rec['display_name']}|{time.time()}".encode("utf-8")).hexdigest()[:4]
+                    keep = CUSTOM_TOOL_NAME_MAX - len(CUSTOM_TOOL_PREFIX) - 5
+                    base = tool_name[len(CUSTOM_TOOL_PREFIX):][:keep].rstrip("_")
+                    tool_name = f"{CUSTOM_TOOL_PREFIX}{base}_{suffix}"
+                created_at = int(time.time())
+
+            # 5) 数量上限（仅新建时校验）
+            if old_name not in recs and len(recs) >= CUSTOM_TOOL_MAX_COUNT:
+                return jsonify({"success": False,
+                                "error": f"自定义工具数量已达上限（{CUSTOM_TOOL_MAX_COUNT} 个）"})
+
+            kws = rec.get("keywords") or []
+            if not isinstance(kws, list):
+                kws = []
+
+            recs[tool_name] = {
+                "tool_name": tool_name,
+                "display_name": str(rec["display_name"]).strip()[:80],
+                "description": str(rec["description"]).strip()[:2000],
+                "parameters": schema,
+                "keywords": [str(k).strip() for k in kws if str(k).strip()][:60],
+                "code": code,
+                "entry": entry,
+                "permission": rec.get("permission") or "admin",
+                "enabled": bool(rec.get("enabled", True)),
+                "timeout": int(rec.get("timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT),
+                "source": str(rec.get("source") or "manual")[:16],
+                "created_at": created_at,
+                "updated_at": int(time.time()),
+                "last_run": recs.get(tool_name, {}).get("last_run"),
+            }
+
+            if not self._save_custom_tools(recs):
+                return jsonify({"success": False,
+                                "error": "写入 custom_tools.json 失败，请查看日志"})
+
+            self._custom_tools = recs
+            registered = self._rebuild_custom_tools()
+            logger.info(f"[QZoneTools] 自定义工具已保存：{tool_name}（当前共注册 {registered} 个）")
+            return jsonify({
+                "success": True,
+                "tool_name": tool_name,
+                "registered_count": registered,
+                "message": f"已保存并注册：{tool_name}",
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 保存自定义工具失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_custom_tool_delete(self):
+        """删除自定义工具并从注册表摘掉。"""
+        try:
+            if not self._webui_is_admin():
+                return jsonify({"success": False, "error": "当前 WebUI 用户无权修改自定义工具"})
+            data = await request.get_json()
+            name = str((data or {}).get("tool_name") or "").strip()
+            if not name:
+                return jsonify({"success": False, "error": "缺少 tool_name"})
+            recs = dict(self._custom_tools or {})
+            if name not in recs:
+                return jsonify({"success": False, "error": f"工具不存在：{name}"})
+            recs.pop(name, None)
+            if not self._save_custom_tools(recs):
+                return jsonify({"success": False, "error": "写入 custom_tools.json 失败"})
+            self._custom_tools = recs
+            self._rebuild_custom_tools()
+            logger.info(f"[QZoneTools] 自定义工具已删除：{name}")
+            return jsonify({"success": True, "message": f"已删除：{name}"})
+        except Exception as e:
+            logger.error(f"[WebUI] 删除自定义工具失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_custom_tool_test(self):
+        """试运行：可跑未保存的代码。走完整的静态检测 + 子进程隔离。"""
+        try:
+            if not self._webui_is_admin():
+                return jsonify({"success": False, "error": "当前 WebUI 用户无权试运行自定义工具"})
+            data = await request.get_json()
+            if not isinstance(data, dict):
+                return jsonify({"success": False, "error": "格式错误"})
+            code = data.get("code")
+            if not isinstance(code, str) or not code.strip():
+                return jsonify({"success": False, "error": "缺少代码"})
+            if len(code.encode("utf-8")) > CUSTOM_TOOL_CODE_MAX_BYTES:
+                return jsonify({"success": False, "error": "代码过长"})
+
+            banned = self._check_banned_patterns(code)
+            if banned:
+                return jsonify({"success": False, "error": f"代码包含禁止的内容：{banned}"})
+
+            args = data.get("args")
+            if args is None:
+                args = {}
+            if not isinstance(args, dict):
+                return jsonify({"success": False, "error": "args 必须是 JSON 对象"})
+
+            entry = str(data.get("entry") or CUSTOM_TOOL_ENTRY_DEFAULT).strip()
+            try:
+                timeout = int(data.get("timeout") or CUSTOM_TOOL_TIMEOUT_DEFAULT)
+            except (TypeError, ValueError):
+                timeout = CUSTOM_TOOL_TIMEOUT_DEFAULT
+            timeout = max(5, min(timeout, CUSTOM_TOOL_TIMEOUT_MAX))
+            try:
+                max_chars = int(self.config.get("max_output_chars", 8000) or 8000)
+            except (TypeError, ValueError):
+                max_chars = 8000
+
+            req = {
+                "protocol": 1,
+                "code": code,
+                "entry": entry,
+                "args": args,
+                "workspace": self.workspace_dir,
+                "max_output_chars": max_chars,
+                "introspect_only": False,
+                "font_path": self._custom_font_path(),
+            }
+            started = time.time()
+            res = await self._custom_run_subprocess(req, timeout)
+            ms = int((time.time() - started) * 1000)
+
+            return jsonify({
+                "success": True,
+                "status": res.get("status") or "error",
+                "message": res.get("message") or "",
+                "stderr": res.get("_stderr") or "",
+                "screenshot": res.get("screenshot") or "",
+                "ms": ms,
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 试运行自定义工具失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
     async def handle_save_config(self):
         try:
             data = await request.get_json()
@@ -5388,10 +6219,40 @@ class Main(Star):
             #   都是构造时读一次就固定。若这里不重新赋值，WebUI 改了配置也不生效，
             #   表现为「进度条上的阈值一直显示旧值」。
             self._sync_supervisor_config()
+            # 自定义工具相关（v5.9.0）：总开关 / 并发信号量 / 重建注册表
+            try:
+                if "custom_tools_max_concurrency" in safe_config:
+                    self._custom_exec_sem = asyncio.Semaphore(
+                        max(1, int(self.config.get("custom_tools_max_concurrency", 3) or 3))
+                    )
+                self._rebuild_custom_tools()
+            except Exception as e:
+                logger.warning(f"[QZoneTools] 自定义工具配置热更新失败: {_safe_error_msg(e)}")
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
             return jsonify({"success": False, "error": "保存失败，请查看日志"})
+
+    def _webui_is_admin(self) -> bool:
+        """WebUI 侧的操作权限判定。
+
+        Dashboard 的登录用户与 QQ 的 admins_id 不是同一套体系。
+        默认与其他页签一致（能进 WebUI 即已登录，放行）；
+        需要收紧的管理员可配 custom_tools_webui_admins 白名单。
+        """
+        try:
+            allowed = self.config.get("custom_tools_webui_admins", []) or []
+        except Exception:
+            allowed = []
+        if not allowed:
+            return True
+        try:
+            name = getattr(request, "username", None)
+        except Exception:
+            name = None
+        if not name:
+            return False   # 配了白名单却读不到用户名 → fail-closed
+        return str(name) in {str(x) for x in allowed}
 
     def _sync_supervisor_config(self) -> None:
         """把最新的浏览器性能配置同步给已存在的 supervisor（配置热更新）。
@@ -8030,14 +8891,15 @@ class Main(Star):
         return None
 
     def _check_banned_ast(self, code: str) -> Optional[str]:
-        """基于 AST 的禁止模式检测，覆盖正则难以处理的动态导入。"""
+        """基于 AST 的禁止模式检测，覆盖正则难以处理的动态导入。
+
+        禁用模块集合提取为模块常量 `_BANNED_MODULES`：宿主侧的静态检测与
+        core/custom_runner.py 的子进程 import 拦截共用同一份名单。
+        两处必须保持一致，否则会出现「宿主放行但子进程拒绝」（或反之）。
+        """
         import ast as _ast
 
-        banned_modules = {
-            "subprocess", "os", "sys", "shutil", "ctypes", "multiprocessing",
-            "socket", "http", "ftplib", "smtplib", "pty", "signal", "resource",
-            "importlib", "pickle", "marshal", "builtins", "gc",
-        }
+        banned_modules = _BANNED_MODULES
         # 危险属性名
         banned_attrs = {"system", "popen", "__import__", "import_module"}
         # 动态取值入口

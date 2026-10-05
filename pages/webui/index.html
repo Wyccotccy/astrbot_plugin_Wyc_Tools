@@ -127,6 +127,18 @@
 
         .section-title { font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
         .section-title .tag { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 20px; background: var(--primary-soft); color: var(--primary); }
+        /* BETA 标记：侧边导航、页头、底部 tab 共用 */
+        .beta-tag {
+            display: inline-flex; align-items: center; flex-shrink: 0;
+            font-size: 9.5px; font-weight: 700; line-height: 1; letter-spacing: .06em;
+            padding: 3px 5px; border-radius: 5px;
+            background: var(--warn-soft); color: #a86a12;
+            border: 1px solid rgba(217, 138, 28, .32);
+            vertical-align: middle;
+        }
+        .nav-btn .beta-tag { margin-left: auto; }
+        .nav-btn.active .beta-tag { background: rgba(255,255,255,.22); color: #fff; border-color: rgba(255,255,255,.4); }
+        .page-head h1 .beta-tag { font-size: 11px; padding: 4px 7px; margin-left: 9px; vertical-align: 4px; }
         .section-desc { font-size: 12.5px; color: var(--text-3); margin: 2px 0 16px; line-height: 1.65; }
         .divider { height: 1px; background: var(--border); margin: 18px 0; }
         .hint { font-size: 11.5px; color: var(--text-3); margin-top: 5px; line-height: 1.55; }
@@ -357,6 +369,208 @@
             color: var(--text-2); font-family: inherit;
         }
         .nt-var:hover { border-color: var(--primary); color: var(--primary); }
+
+        /* ==================== 自定义工具（v5.9.0） ==================== */
+        .ct-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            padding: 1px 5px; border-radius: 5px; background: var(--surface-2); border: 1px solid var(--border); }
+
+        /* 提示条 */
+        .ct-warn {
+            display: flex; align-items: flex-start; gap: 9px;
+            padding: 11px 13px; margin-bottom: 14px;
+            border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.65;
+            background: var(--warn-soft); color: #8a5710;
+            border: 1px solid rgba(217, 138, 28, .28);
+        }
+        .ct-warn svg { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
+        .ct-warn strong { font-weight: 700; }
+        .ct-warn.info { background: var(--primary-soft); color: #414a85; border-color: var(--primary-soft-2); }
+
+        /* 列表卡片 */
+        .ct-item { flex-direction: column; align-items: stretch; gap: 9px; padding: 13px 14px; }
+        .ct-head { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+        .ct-name { font-size: 13.5px; font-weight: 650; min-width: 0; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+        .ct-toolname { font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            color: var(--text-3); overflow-wrap: anywhere; }
+        .ct-desc { font-size: 12px; color: var(--text-2); line-height: 1.55; overflow-wrap: anywhere;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .ct-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; font-size: 11.5px; color: var(--text-3); }
+        .ct-meta b { font-weight: 600; color: var(--text-2); }
+        .ct-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+        /* 抽屉 */
+        .ct-mask {
+            position: fixed; inset: 0; z-index: 400;
+            background: rgba(28, 34, 56, .40); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+            opacity: 0; pointer-events: none; transition: opacity .22s var(--ease);
+        }
+        .ct-mask.show { opacity: 1; pointer-events: auto; }
+        .ct-drawer {
+            position: fixed; top: 0; right: 0; bottom: 0; z-index: 401;
+            width: min(760px, 100vw); display: flex; flex-direction: column;
+            background: var(--surface); box-shadow: var(--shadow-lg);
+            transform: translateX(101%); transition: transform .26s var(--ease);
+        }
+        .ct-drawer.show { transform: none; }
+        .ct-drawer-head {
+            display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+            padding: 18px 20px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .ct-drawer-title { font-size: 16.5px; font-weight: 680; letter-spacing: -.01em; }
+        .ct-drawer-sub { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+        .ct-close {
+            flex-shrink: 0; width: 32px; height: 32px; border-radius: 9px; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2);
+        }
+        .ct-close:hover { border-color: var(--primary); color: var(--primary); }
+        .ct-close svg { width: 16px; height: 16px; }
+        .ct-drawer-body { flex: 1; overflow-y: auto; padding: 18px 20px 22px; }
+        .ct-drawer-foot {
+            display: flex; align-items: center; gap: 9px; flex-shrink: 0;
+            padding: 13px 20px calc(13px + env(safe-area-inset-bottom));
+            border-top: 1px solid var(--border); background: var(--surface-2);
+        }
+        .ct-foot-status { flex: 1; min-width: 0; font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
+        .ct-foot-status.error { color: #a83b34; font-weight: 600; }
+        .ct-foot-status.success { color: #16764f; font-weight: 600; }
+
+        /* 抽屉分块 */
+        .ct-block { padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px dashed var(--border); }
+        .ct-block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        .ct-block-title {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            font-size: 13.5px; font-weight: 660; margin-bottom: 12px;
+        }
+        .ct-block-hint { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+        .ct-req { color: var(--danger); font-weight: 700; }
+        .ct-grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+        /* 自定义工具页的「使用说明」折叠卡 */
+        .ct-guide { font-size: 12.5px; }
+        .ct-guide > summary {
+            cursor: pointer; list-style: none; display: flex; align-items: center;
+            gap: 10px; flex-wrap: wrap; padding: 2px 0;
+        }
+        .ct-guide > summary::-webkit-details-marker { display: none; }
+        .ct-guide > summary::before {
+            content: '▸'; color: var(--primary); font-size: 12px;
+            transition: transform .18s var(--ease); flex-shrink: 0;
+        }
+        .ct-guide[open] > summary::before { transform: rotate(90deg); }
+        .ct-guide-t { font-size: 13.5px; font-weight: 660; color: var(--text); }
+        .ct-guide-hint { font-size: 11.5px; color: var(--text-3); }
+        .ct-guide-link {
+            font-size: 11.5px; font-weight: 620; color: var(--primary);
+            text-decoration: none; white-space: nowrap;
+        }
+        .ct-guide-link:hover { text-decoration: underline; }
+        .ct-guide-body { margin-top: 14px; display: flex; flex-direction: column; gap: 16px; }
+        .ct-guide-sec { padding-left: 12px; border-left: 2px solid var(--border); }
+        .ct-guide-h { font-size: 12.5px; font-weight: 660; color: var(--text); margin-bottom: 7px; }
+        .ct-guide-ol, .ct-guide-ul { margin: 0; padding-left: 19px; line-height: 1.85; color: var(--text-2); }
+        .ct-guide-ol li, .ct-guide-ul li { margin-bottom: 3px; }
+        .ct-guide-note {
+            font-size: 11.8px; line-height: 1.7; color: var(--text-3);
+            background: var(--surface-2); border-radius: var(--radius-sm);
+            padding: 8px 11px; margin-top: 8px;
+        }
+        .ct-guide-code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11.5px; line-height: 1.6; white-space: pre; overflow-x: auto;
+            background: #fbfcfe; border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 10px 12px; margin-bottom: 9px; color: var(--text-2);
+        }
+        .ct-guide-prompt {
+            width: 100%; box-sizing: border-box; resize: vertical;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11.5px; line-height: 1.6; padding: 10px 12px;
+            border: 1px solid var(--border); border-radius: var(--radius-sm);
+            background: var(--surface-2); color: var(--text-2);
+        }
+        .ct-guide-prompt:focus { outline: none; border-color: var(--primary); }
+        .ct-guide-btns { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+        .ct-guide-ok { font-size: 11.5px; color: #16764f; font-weight: 600; }
+
+        /* 开关 */
+        .ct-switch { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 400;
+            color: var(--text-2); cursor: pointer; padding-top: 7px; }
+        .ct-switch input { width: auto; accent-color: var(--primary); cursor: pointer; }
+
+        /* 代码区 */
+        .ct-code-toolbar { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; flex-wrap: wrap; }
+        .ct-spacer { flex: 1; }
+        .ct-code-status { font-size: 11.5px; color: var(--text-3); }
+        .ct-code-status.ok { color: #16764f; }
+        .ct-code-status.bad { color: #a83b34; }
+        .ct-code-wrap {
+            display: flex; align-items: stretch; overflow: hidden;
+            border: 1px solid var(--border); border-radius: var(--radius-sm);
+            background: var(--surface-2);
+        }
+        .ct-code-wrap:focus-within { border-color: var(--primary); }
+        .ct-lines {
+            flex-shrink: 0; width: 42px; padding: 11px 7px 11px 0; text-align: right;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12.5px; line-height: 1.62; color: var(--text-3);
+            background: rgba(120, 128, 155, .07); border-right: 1px solid var(--border);
+            overflow: hidden; user-select: none; white-space: pre;
+        }
+        .ct-code-wrap textarea {
+            flex: 1; min-width: 0; border: none; background: transparent; resize: vertical;
+            padding: 11px 12px; min-height: 300px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12.5px; line-height: 1.62; color: var(--text);
+            white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4;
+        }
+        .ct-code-wrap textarea:focus { outline: none; }
+        .ct-code-wrap textarea::placeholder { color: var(--text-3); }
+
+        /* 参数预览 */
+        .ct-params { margin-top: 10px; }
+        .ct-params-head { font-size: 11.5px; font-weight: 650; color: var(--text-2);
+            display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+        .ct-param-row {
+            display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+            padding: 7px 10px; border-radius: 7px; font-size: 12px;
+            background: var(--surface-2); border: 1px solid var(--border); margin-bottom: 5px;
+        }
+        .ct-param-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-weight: 650; color: var(--primary); }
+        .ct-param-type { font-size: 10.5px; padding: 1px 7px; border-radius: 99px;
+            background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+        .ct-param-req { font-size: 10.5px; padding: 1px 7px; border-radius: 99px;
+            background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+        .ct-param-opt { font-size: 10.5px; padding: 1px 7px; border-radius: 99px;
+            background: var(--surface); color: var(--text-3); border: 1px solid var(--border); }
+        .ct-param-desc { color: var(--text-3); flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+
+        /* 运行结果 */
+        .ct-run-out {
+            margin-top: 11px; padding: 11px 13px; border-radius: var(--radius-sm);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+            max-height: 240px; overflow-y: auto;
+            background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2);
+        }
+        .ct-run-out.ok { background: var(--success-soft); border-color: rgba(30, 158, 106, .26); color: #16764f; }
+        .ct-run-out.err { background: var(--danger-soft); border-color: rgba(216, 87, 79, .26); color: #a83b34; }
+        .ct-run-meta { font-size: 11px; color: var(--text-3); margin-bottom: 6px; font-family: inherit; }
+
+        @media (max-width: 900px) {
+            .ct-drawer { width: 100vw; }
+            .ct-grid3 { grid-template-columns: 1fr; }
+            .ct-code-wrap textarea { min-height: 220px; font-size: 12px; }
+            .ct-lines { font-size: 12px; width: 36px; }
+            .ct-drawer-body { padding: 15px 14px 18px; }
+            .ct-drawer-head { padding: 15px 14px 12px; }
+            .ct-drawer-foot { padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
+            .ct-drawer-foot .btn { flex: 1; }
+            .ct-foot-status { flex: 1 1 100%; order: -1; }
+            .ct-actions .btn { flex: 1 1 calc(50% - 3px); }
+            .ct-run-out { max-height: 180px; }
+        }
 
         /* ==================== 悬浮保存按钮 ==================== */
         .floating-save {
@@ -870,6 +1084,11 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg>
                     工具返回文案
                 </button>
+                <button class="nav-btn" data-page="custom">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 7L4 12l4.5 5M15.5 7L20 12l-4.5 5M13.5 4.5l-3 15"/></svg>
+                    自定义工具
+                    <span class="beta-tag">BETA</span>
+                </button>
             </nav>
             <div class="sidebar-foot">Wyccotccy &amp; 烬熵Cinder</div>
         </aside>
@@ -1216,6 +1435,52 @@
                             <label>NapCat 容器名称</label>
                             <input id="docker_container_name" placeholder="napcat" />
                             <div class="hint">闪传功能中 docker cp 使用的容器名</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="section-title">🐍 自定义 Python 函数工具 <span class="tag">NEW</span></div>
+                        <div class="section-desc">
+                            允许在「自定义工具」页写 Python 函数并注册为 AI 可调用的工具。
+                            代码在<strong>隔离子进程</strong>中执行（`-I` 隔离 + 资源限制 + 超时强杀）。
+                        </div>
+
+                        <div class="warn-box" style="background:var(--warn-soft);color:#8a5710;border:1px solid rgba(217,138,28,.28);border-radius:var(--radius-sm);padding:11px 13px;font-size:12.5px;line-height:1.65;margin-bottom:14px;">
+                            ⚠️ <strong>安全提示：</strong>本功能可执行任意 Python 代码，风险等级等同于 `run_python_code` 工具。
+                            防护为静态检测 + 进程隔离，<strong>不等同于内核级安全沙箱</strong>。
+                            请仅在受信任的环境启用。
+                        </div>
+
+                        <div class="switch-row">
+                            <input type="checkbox" id="custom_tools_enabled" />
+                            <label class="switch-text" for="custom_tools_enabled"><span class="t">启用自定义 Python 函数工具</span><span class="d">关闭时无法保存/试运行自定义工具（默认关闭）</span></label>
+                        </div>
+                        <div class="switch-row">
+                            <input type="checkbox" id="custom_tools_allow_global" />
+                            <label class="switch-text" for="custom_tools_allow_global"><span class="t">允许把自定义工具设为「全局」档</span><span class="d">关闭时所有自定义工具强制「超管」档且不可降档</span></label>
+                        </div>
+
+                        <div class="divider"></div>
+
+                        <div class="two-col">
+                            <div class="field">
+                                <label>最大并发执行数</label>
+                                <input type="number" id="custom_tools_max_concurrency" value="3" min="1" max="20" />
+                                <div class="hint">同时执行的自定义工具数量上限</div>
+                            </div>
+                            <div class="field">
+                                <label>最长执行时间（秒）</label>
+                                <input type="number" id="custom_tools_timeout_max" value="120" min="5" max="3600" />
+                                <div class="hint">实际生效值还会被 AstrBot 全局「工具调用超时」钳制（预留 12 秒收尾）</div>
+                            </div>
+                        </div>
+
+                        <div class="divider"></div>
+
+                        <div class="field">
+                            <label>允许操作自定义工具的 WebUI 用户名（每行一个）</label>
+                            <textarea id="custom_tools_webui_admins" rows="2" placeholder="留空 = 任意已登录的 WebUI 用户都可操作"></textarea>
+                            <div class="hint">填写后仅白名单内的用户名可保存/删除/试运行自定义工具</div>
                         </div>
                     </div>
 
@@ -1732,6 +1997,202 @@
                     </div>
                 </div>
 
+                <!-- ======== 自定义工具（v5.9.0） ======== -->
+                <div id="customPage" class="content">
+                    <div class="page-head">
+                        <h1>自定义工具<span class="beta-tag">BETA</span></h1>
+                        <p>用 Python 写自己的函数工具，AI 可通过搜索发现并调用</p>
+                    </div>
+
+                    <div class="card">
+                        <details class="ct-guide">
+                            <summary>
+                                <span class="ct-guide-t">📖 使用说明（第一次用请先看这里）</span>
+                                <span class="ct-guide-hint">3 分钟上手 · 规范要点 · 给外部 AI 的提示词</span>
+                                <span class="ct-spacer"></span>
+                                <a class="ct-guide-link" href="https://wyctools.wyccotccy.cn"
+                                   target="_blank" rel="noopener noreferrer">查看完整文档 ↗</a>
+                            </summary>
+
+                            <div class="ct-guide-body">
+                                <div class="ct-guide-sec">
+                                    <div class="ct-guide-h">① 三步写好一个工具</div>
+                                    <ol class="ct-guide-ol">
+                                        <li>点上方「<strong>新建工具</strong>」</li>
+                                        <li>填<strong>名称</strong>、<strong>描述</strong>、<strong>搜索词</strong>，粘贴代码</li>
+                                        <li>点「<strong>试跑</strong>」验证 → 点「<strong>校验并保存</strong>」</li>
+                                    </ol>
+                                    <div class="ct-guide-note">
+                                        保存后 AI 就能搜到它。在 QQ 里问一句相关的，看 AI 是否会调用。
+                                    </div>
+                                </div>
+
+                                <div class="ct-guide-sec">
+                                    <div class="ct-guide-h">② 代码必须遵守的三条</div>
+                                    <div class="ct-guide-code">def main(city: str, days: int = 1) -> dict:
+    """查询指定城市的实时天气。
+
+    Args:
+        city(string): 城市名，如「北京」
+        days(integer): 查询未来几天，默认 1
+    """
+    return {"status": "success", "message": "结果文本"}</div>
+                                    <ul class="ct-guide-ul">
+                                        <li>入口函数叫 <code class="ct-code">main</code>，必须是<strong>顶层函数</strong></li>
+                                        <li>docstring 里必须有 <code class="ct-code">Args:</code> 段，
+                                            格式严格为 <code class="ct-code">参数名(类型): 描述</code>
+                                            —— 冒号括号用<strong>英文</strong></li>
+                                        <li>类型只能是
+                                            <code class="ct-code">string</code>
+                                            <code class="ct-code">integer</code>
+                                            <code class="ct-code">number</code>
+                                            <code class="ct-code">boolean</code>
+                                            <code class="ct-code">array</code>
+                                            <code class="ct-code">object</code>
+                                        </li>
+                                    </ul>
+                                    <div class="ct-guide-note">
+                                        编辑代码时下方的「<strong>参数预览</strong>」会实时显示解析结果 ——
+                                        参数没出现或类型不对，就是 docstring 写错了。
+                                    </div>
+                                </div>
+
+                                <div class="ct-guide-sec">
+                                    <div class="ct-guide-h">③ 让 AI 帮你写代码（推荐）</div>
+                                    <div class="ct-guide-note" style="margin-bottom:8px">
+                                        把下面这段复制给 ChatGPT / Claude / DeepSeek 等，
+                                        末尾写上你的需求，AI 就会给出符合本插件规范的代码。
+                                    </div>
+                                    <textarea class="ct-guide-prompt" id="ctGuidePrompt" readonly rows="9">你是一个 Python 助手。我要给一个 AstrBot 插件写「自定义工具」——本质就是一个 Python 函数，保存后会被 AI 调用。
+
+请严格按以下规范生成代码：
+
+【必须遵守】
+1. 定义一个顶层函数 main(...)，参数就是调用时要传的参数
+2. 必须有 docstring，且必须包含 Args: 段，格式严格为：
+
+       def main(city: str, days: int = 1) -> dict:
+           """查询指定城市的天气。
+
+           Args:
+               city(string): 城市名，如「北京」
+               days(integer): 查询未来几天，默认 1
+           """
+
+   · Args: 单独一行；参数行比 Args: 再缩进一级
+   · 格式为 `参数名(类型): 描述`，冒号和括号都用英文
+   · 类型只能是：string / integer / number / boolean / array / object
+3. 无默认值的参数 = 必填；有默认值 = 可选
+4. 返回值用 dict：{"status": "success" 或 "error", "message": "给 AI 看的文本"}
+5. 参数尽量少（1-2 个最好），AI 更容易传对
+
+【运行环境硬约束——违反会导致代码被拒绝保存】
+- 禁止 import：subprocess, os, sys, shutil, ctypes, multiprocessing,
+  socket, http, ftplib, smtplib, pty, signal, resource, importlib,
+  pickle, marshal, builtins, gc
+- 禁止调用：eval, exec, compile, __import__
+- 禁止访问 /etc /proc /root /www /AstrBot 下的绝对路径
+- 需要路径操作请用 pathlib（from pathlib import Path）
+
+【可用库】
+- 标准库：json, re, math, datetime, random, time, base64, hashlib,
+  itertools, collections, textwrap, decimal, statistics, uuid, csv,
+  urllib.request（访问公网）, pathlib, functools, operator, enum,
+  dataclasses, unicodedata, calendar, difflib, zlib, gzip, struct
+- 第三方（已安装）：aiohttp, requests, httpx, Pillow(PIL), numpy,
+  pandas, matplotlib, bs4, lxml, yaml, psutil, dateutil, pypinyin
+
+【其他】
+- 当前工作目录就是工作区，写文件用相对路径，如 open("out.txt", "w")
+- 可用辅助对象 wyc：wyc.log(...) 写日志
+- 画图时中文字体已自动配好，直接写中文即可
+- 网络请求请加 try/except 与 timeout，失败时返回 {"status": "error", "message": "具体原因"}
+
+【输出格式】
+只输出一个 Python 代码块，不要解释文字。代码要能直接粘贴运行。
+
+我的需求：【在这里写你要的工具】</textarea>
+                                    <div class="ct-guide-btns">
+                                        <button class="btn btn-sm" id="ctGuideCopyBtn" type="button">复制提示词</button>
+                                        <span class="ct-guide-ok" id="ctGuideCopyOk"></span>
+                                    </div>
+                                </div>
+
+                                <div class="ct-guide-sec">
+                                    <div class="ct-guide-h">④ 常见问题</div>
+                                    <ul class="ct-guide-ul">
+                                        <li><strong>AI 搜不到我的工具？</strong>
+                                            检查工具是否已启用、权限是否为「超管」（默认）、
+                                            以及搜索词够不够口语化。</li>
+                                        <li><strong>为什么只有管理员能用？</strong>
+                                            本功能可执行任意 Python 代码，默认「超管」且不可降档，
+                                            需管理员显式开启后才能设为「全局」。</li>
+                                        <li><strong>代码存在哪？</strong>
+                                            <code class="ct-code">data/plugin_data/astrbot_plugin_qzone_tools/custom_tools.json</code>
+                                            —— 明文存储，不要写密钥。</li>
+                                        <li><strong>能调用其他插件工具吗？</strong>
+                                            不能。工具在隔离子进程中运行，无法访问插件其他能力。</li>
+                                        <li><strong>完整文档在哪？</strong>
+                                            在线版：<a href="https://wyctools.wyccotccy.cn" target="_blank"
+                                                rel="noopener noreferrer">wyctools.wyccotccy.cn</a>
+                                            —— 11 章、20+ 完整示例、错误对照表、可搜索。<br />
+                                            离线版：插件目录下的 <code class="ct-code">docs/自定义工具开发指南.md</code>。</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+
+                    <div class="card">
+                        <div class="section-title">
+                            工具列表
+                            <span class="tag" id="customCountTag">0</span>
+                        </div>
+                        <div class="section-desc">
+                            写好的函数会注册为
+                            <code class="ct-code">Wyc_custom_tool_&lt;名称&gt;</code>，
+                            AI 通过 <code class="ct-code">search_wyc_tools</code> →
+                            <code class="ct-code">run_wyc_tool</code> 调用。
+                            代码在<strong>隔离子进程</strong>中执行（带资源限制与超时），默认仅<strong>超管</strong>可用。
+                        </div>
+
+                        <div class="ct-warn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+                            <div>
+                                <strong>安全提示：</strong>本功能可执行任意 Python 代码，等同于给管理员开一个代码执行入口。
+                                防护为静态检测 + 进程隔离 + 资源限制，<strong>不等同于安全沙箱</strong>。
+                                请仅在受信任的环境使用，不要给不可信用户开放「全局」档位。
+                            </div>
+                        </div>
+
+                        <div id="customPreviewBar" class="ct-warn info" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                            <div>
+                                <strong>界面预览模式：</strong>后端接口尚未接入，下方为示例数据，仅供查看界面。
+                                接口就绪后会自动切换为真实数据。
+                            </div>
+                        </div>
+
+                        <div id="customDisabledBar" class="ct-warn" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+                            <div>
+                                <strong>功能未启用：</strong>自定义工具目前处于关闭状态，<strong>无法保存或试运行</strong>。
+                                请到左侧导航的「<strong>配置</strong>」页，开启「<strong>启用自定义 Python 函数工具</strong>」并点「保存配置」，再回到本页使用。
+                            </div>
+                        </div>
+
+                        <div class="filter-bar">
+                            <button class="btn btn-ghost btn-sm" id="customRefreshBtn">刷新</button>
+                            <button class="btn btn-sm" id="customNewBtn">新建工具</button>
+                            <input type="text" id="customFilter" placeholder="搜索名称 / 描述 / 注册名…" style="width:auto;min-width:150px;flex:1;" />
+                            <span id="customStat" class="kw-stat"></span>
+                        </div>
+
+                        <div id="customList" class="tool-grid"></div>
+                        <div id="customStatus" class="status"></div>
+                    </div>
+                </div>
+
                 <div class="sig">Wyccotccy &amp; 烬熵Cinder</div>
             </div>
         </div>
@@ -1792,7 +2253,121 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg>
             返回文案
         </button>
+        <button class="tab" data-page="custom">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 7L4 12l4.5 5M15.5 7L20 12l-4.5 5M13.5 4.5l-3 15"/></svg>
+            自定义 <span class="beta-tag">BETA</span>
+        </button>
     </nav>
+
+    <!-- ============ 自定义工具编辑抽屉（v5.9.0） ============ -->
+    <div class="ct-mask" id="ctMask"></div>
+    <aside class="ct-drawer" id="ctDrawer" role="dialog" aria-modal="true" aria-labelledby="ctDrawerTitle">
+        <div class="ct-drawer-head">
+            <div>
+                <div class="ct-drawer-title" id="ctDrawerTitle">新建自定义工具</div>
+                <div class="ct-drawer-sub" id="ctDrawerSub">写一个 Python 函数，AI 即可调用它</div>
+            </div>
+            <button class="ct-close" id="ctCloseBtn" type="button" title="关闭">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+
+        <div class="ct-drawer-body">
+            <!-- ---- 基础信息 ---- -->
+            <div class="ct-block">
+                <div class="ct-block-title">基础信息</div>
+                <div class="field">
+                    <label for="ctName">名称 <span class="ct-req">*</span></label>
+                    <input type="text" id="ctName" maxlength="60" placeholder="如：天气查询（中文会自动转拼音作为注册名）" />
+                    <div class="hint" id="ctToolnameHint">注册名将在填写后生成</div>
+                </div>
+                <div class="field">
+                    <label for="ctDesc">描述 <span class="ct-req">*</span>
+                        <span class="ct-block-hint">AI 靠这段判断什么场景该调用它</span>
+                    </label>
+                    <textarea id="ctDesc" rows="2" maxlength="500" placeholder="如：查询指定城市的实时天气。当用户询问某地天气时调用。"></textarea>
+                </div>
+                <div class="field">
+                    <label for="ctKeywords">搜索词
+                        <span class="ct-block-hint">英文逗号分隔，写用户可能的口语说法</span>
+                    </label>
+                    <input type="text" id="ctKeywords" placeholder="如：天气, 气温, 下雨, weather" />
+                </div>
+            </div>
+
+            <!-- ---- 代码 ---- -->
+            <div class="ct-block">
+                <div class="ct-block-title">
+                    代码 <span class="ct-req">*</span>
+                    <span class="ct-block-hint">约定入口函数 main，参数即 AI 要传的参数</span>
+                </div>
+                <div class="ct-code-toolbar">
+                    <button class="btn btn-ghost btn-xs" id="ctTplBtn" type="button">插入模板</button>
+                    <button class="btn btn-ghost btn-xs" id="ctIndentBtn" type="button">整理缩进</button>
+                    <button class="btn btn-ghost btn-xs" id="ctIntrospectBtn" type="button">检查参数</button>
+                    <span class="ct-spacer"></span>
+                    <span class="ct-code-status" id="ctCodeStatus"></span>
+                </div>
+                <div class="ct-code-wrap">
+                    <div class="ct-lines" id="ctCodeLines">1</div>
+                    <textarea id="ctCode" spellcheck="false" autocapitalize="off" autocorrect="off"
+                        placeholder="def main(city: str) -> dict:&#10;    &quot;&quot;&quot;查询天气。&#10;&#10;    Args:&#10;        city(string): 城市名&#10;    &quot;&quot;&quot;&#10;    return {&quot;status&quot;: &quot;success&quot;, &quot;message&quot;: f&quot;{city} 晴&quot;}"></textarea>
+                </div>
+                <div class="ct-params" id="ctParamsBox" style="display:none;">
+                    <div class="ct-params-head">参数预览</div>
+                    <div id="ctParamsList"></div>
+                </div>
+            </div>
+
+            <!-- ---- 运行设置 ---- -->
+            <div class="ct-block">
+                <div class="ct-block-title">运行设置</div>
+                <div class="ct-grid3">
+                    <div class="field">
+                        <label for="ctPerm">权限档位</label>
+                        <select id="ctPerm">
+                            <option value="admin">超管（默认）</option>
+                            <option value="groupadmin">群主/管理员</option>
+                            <option value="global">全局</option>
+                            <option value="disabled">禁用</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="ctTimeout">超时（秒）</label>
+                        <input type="number" id="ctTimeout" value="30" min="5" max="120" />
+                    </div>
+                    <div class="field">
+                        <label>启用</label>
+                        <label class="ct-switch"><input type="checkbox" id="ctEnabled" checked /> 注册为 AI 可调用工具</label>
+                    </div>
+                </div>
+                <div class="hint">「全局」档需先在插件配置里开启「允许把自定义工具设为全局」；否则会被强制为超管。</div>
+            </div>
+
+            <!-- ---- 试运行 ---- -->
+            <div class="ct-block">
+                <div class="ct-block-title">
+                    试运行
+                    <span class="ct-block-hint">可直接跑未保存的代码</span>
+                </div>
+                <div class="field">
+                    <label for="ctTestArgs">参数（JSON）</label>
+                    <textarea id="ctTestArgs" rows="2" placeholder='{"city": "北京"}'></textarea>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-ghost btn-sm" id="ctTestBtn" type="button">运行</button>
+                    <span class="ct-foot-status" id="ctTestMeta"></span>
+                </div>
+                <div class="ct-run-out" id="ctTestOut" style="display:none;"></div>
+            </div>
+        </div>
+
+        <div class="ct-drawer-foot">
+            <span class="ct-foot-status" id="ctFootStatus"></span>
+            <button class="btn btn-ghost" id="ctCancelBtn" type="button">取消</button>
+            <button class="btn" id="ctSaveBtn" type="button">校验并保存</button>
+        </div>
+    </aside>
 
     <!-- ============ 自定义确认弹窗（替代被沙箱拦截的原生 confirm） ============ -->
     <div class="modal-mask" id="confirmMask">
@@ -1897,10 +2472,18 @@ if (!window.AstrBotPluginPage) {
         const bridge = window.AstrBotPluginPage;
         if (!bridge) console.warn("AstrBotPluginPage bridge not detected, API calls will fail");
 
+        // HTML 转义。
+        // ⚠️ 必须同时转义引号：本函数也被用在**属性上下文**
+        //    （如 data-xxx="' + escapeHtml(v) + '"）。
+        //    旧实现用 textNode → innerHTML 序列化，只转 & < >，
+        //    不转 " 与 ' —— 只要 v 里带双引号就能突破属性、注入事件处理器。
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.appendChild(document.createTextNode(text == null ? '' : String(text)));
-            return div.innerHTML;
+            const s = text == null ? '' : String(text);
+            return s.replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
         }
 
         function showBridgeError(msg) {
@@ -1953,7 +2536,8 @@ if (!window.AstrBotPluginPage) {
             takeover: '浏览器接管', memory: '记忆管理', schedule: '定时消息',
             permission: '权限控制',
             adapter: '工具适配器', adapterperm: '适配器权限控制',
-            keywords: '补充工具搜索词', notes: '工具返回文案'
+            keywords: '补充工具搜索词', notes: '工具返回文案',
+            custom: '自定义工具'
         };
 
         function switchPage(page) {
@@ -1975,6 +2559,7 @@ if (!window.AstrBotPluginPage) {
             if (page === 'adapterperm') loadAdapterPerm();
             if (page === 'keywords') loadKeywords();
             if (page === 'notes') loadNotes();
+            if (page === 'custom') loadCustomTools();
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
@@ -2067,6 +2652,12 @@ if (!window.AstrBotPluginPage) {
                 browser_memory_limit_mb: num('browser_memory_limit_mb', 0),
                 idle_timeout: num('idle_timeout', 300),
                 monitor_interval: num('monitor_interval', 10),
+                // 自定义 Python 函数工具（v5.9.0）
+                custom_tools_enabled: checked('custom_tools_enabled'),
+                custom_tools_allow_global: checked('custom_tools_allow_global'),
+                custom_tools_max_concurrency: num('custom_tools_max_concurrency', 3),
+                custom_tools_timeout_max: num('custom_tools_timeout_max', 120),
+                custom_tools_webui_admins: val('custom_tools_webui_admins').split('\n').map(s => s.trim()).filter(Boolean),
             };
         }
 
@@ -4602,6 +5193,674 @@ if (!window.AstrBotPluginPage) {
                 showScheduleStatus(e.message, 'error');
             }
         });
+
+        // ==================== 自定义工具（v5.9.0） ====================
+        // 说明：本页后端接口尚未接入。当 custom_tools_list 调用失败时，
+        // 自动进入「界面预览模式」——用示例数据渲染，并挂一条醒目横幅。
+        // 接口就绪后横幅自动隐藏、切真实数据，无需改代码。
+        let ctItems = [];            // 工具列表（真实或示例）
+        let ctEditing = null;        // 正在编辑的 tool_name；null = 新建
+        let ctPreview = false;       // 是否处于预览模式
+        let ctIntroTimer = null;     // 参数推导防抖计时器
+        let ctEnabledFlag = true;    // 后端报告的功能总开关
+        let ctAllowGlobal = false;   // 是否允许把工具设为「全局」档
+
+        // 预览模式的示例数据（仅供看界面）
+        const CT_DEMO = [
+            {
+                tool_name: 'Wyc_custom_tool_tian_qi_cha_xun',
+                display_name: '天气查询',
+                description: '查询指定城市的实时天气。当用户询问某地天气、气温、是否下雨时调用。',
+                keywords: ['天气', '气温', '下雨', 'weather'],
+                permission: 'admin', enabled: true, timeout: 30, source: 'manual',
+                registered: true,
+                last_run: { at: Math.floor(Date.now() / 1000) - 412, status: 'success', ms: 412 },
+                code: 'def main(city: str, days: int = 1) -> dict:\n    """查询指定城市的实时天气。\n\n    Args:\n        city(string): 城市名，如「北京」\n        days(integer): 查询未来几天，默认 1\n    """\n    import urllib.request\n    url = f"https://wttr.in/{city}?format=j1"\n    with urllib.request.urlopen(url, timeout=8) as r:\n        data = r.read().decode("utf-8")\n    return {"status": "success", "message": data[:200]}\n'
+            },
+            {
+                tool_name: 'Wyc_custom_tool_ji_suan_biao_da_shi',
+                display_name: '计算表达式',
+                description: '计算一个数学表达式并返回结果。支持 +-*/ 与常用数学函数。',
+                keywords: ['计算', '算一下', '数学', 'calculator'],
+                permission: 'admin', enabled: true, timeout: 10, source: 'manual',
+                registered: true, last_run: null,
+                code: 'import re\n\ndef main(text: str) -> dict:\n    """提取文本中的数字。\n\n    Args:\n        text(string): 要处理的文本\n    """\n    found = re.findall(r"\\\\d+", text)\n    if not found:\n        return {"status": "success", "message": "没有找到数字"}\n    return {"status": "success", "message": "找到：" + ", ".join(found)}\n'
+            },
+            {
+                tool_name: 'Wyc_custom_tool_zhun_bei_zhong_de_gong_ju',
+                display_name: '未启用的示例工具',
+                description: '这是一个处于禁用状态的示例，用于展示列表中的状态差异。',
+                keywords: ['示例'],
+                permission: 'disabled', enabled: false, timeout: 30, source: 'manual',
+                registered: false, last_run: { at: Math.floor(Date.now() / 1000) - 9000, status: 'error', ms: 30012 },
+                code: 'def main() -> dict:\n    """示例。"""\n    return {"status": "success", "message": "ok"}\n'
+            }
+        ];
+
+        const CT_CODE_TPL = [
+            'def main(city: str, days: int = 1) -> dict:',
+            '    """查询指定城市的实时天气。',
+            '',
+            '    Args:',
+            '        city(string): 城市名，如「北京」',
+            '        days(integer): 查询未来几天，默认 1',
+            '    """',
+            '    # 在这里写你的逻辑；可用的库见页面说明',
+            '    result = f"{city} 未来 {days} 天晴"',
+            '    return {"status": "success", "message": result}',
+            ''
+        ].join('\n');
+
+        // ---------- 工具函数 ----------
+        function ctEl(id) { return document.getElementById(id); }
+
+        // 带超时的 API 封装。后端接口未接入时，Dashboard 返回 404 会让 Promise
+        // reject（走 catch → 预览模式）；但若接口存在却挂起，页面会永久空白。
+        // 这里加超时兜底，保证任何情况下都能渲染出界面。
+        function ctRace(p, ms) {
+            return Promise.race([
+                p,
+                new Promise((_, rej) => setTimeout(
+                    () => rej(new Error('接口无响应（后端可能尚未接入）')), ms || 8000))
+            ]);
+        }
+        function ctGet(endpoint, params, ms) { return ctRace(bridge.apiGet(endpoint, params), ms); }
+        function ctPost(endpoint, body, ms) { return ctRace(bridge.apiPost(endpoint, body), ms); }
+
+        function ctShowStatus(msg, type) {
+            const el = ctEl('customStatus');
+            el.textContent = msg;
+            el.className = 'status show ' + (type || 'success');
+            setTimeout(() => el.classList.remove('show'), 3500);
+        }
+
+        function ctSetFoot(msg, type) {
+            const el = ctEl('ctFootStatus');
+            el.textContent = msg || '';
+            el.className = 'ct-foot-status' + (type ? ' ' + type : '');
+        }
+
+        function ctFmtTime(ts) {
+            if (!ts) return '从未运行';
+            const d = new Date(ts * 1000);
+            const p = n => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+                   ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+        }
+
+        const CT_PERM_LABEL = { global: '全局', groupadmin: '群主/管理员', admin: '超管', disabled: '禁用' };
+
+        // ---------- 列表 ----------
+        async function loadCustomTools() {
+            try {
+                const res = await ctGet('custom_tools_list');
+                if (!res || !res.success) throw new Error((res && res.error) || '接口未就绪');
+                ctItems = res.items || [];
+                ctPreview = false;
+                // 功能总开关：关闭时提前告知，避免写完代码点保存才被拒
+                ctEnabledFlag = res.enabled !== false;
+                ctAllowGlobal = res.allow_global === true;
+            } catch (e) {
+                // 后端未接入：降级为预览模式，保证界面可查看
+                ctItems = CT_DEMO.slice();
+                ctPreview = true;
+                ctEnabledFlag = true;
+                ctAllowGlobal = false;
+            }
+            const bar = ctEl('customPreviewBar');
+            if (bar) bar.style.display = ctPreview ? 'flex' : 'none';
+            const dbar = ctEl('customDisabledBar');
+            if (dbar) dbar.style.display = (!ctPreview && !ctEnabledFlag) ? 'flex' : 'none';
+            // 未启用时禁用会写盘的按钮（试运行/保存/新建都走后端）
+            ['customNewBtn'].forEach(id => {
+                const b = ctEl(id);
+                if (b) b.disabled = (!ctPreview && !ctEnabledFlag);
+            });
+            renderCustomList();
+            ctUpdateStat();
+        }
+
+        function ctUpdateStat() {
+            const total = ctItems.length;
+            const reg = ctItems.filter(it => it.registered && it.enabled).length;
+            const off = ctItems.filter(it => !it.enabled).length;
+            ctEl('customStat').textContent = '共 ' + total + ' 个 · 已注册 ' + reg + ' 个 · 已禁用 ' + off + ' 个';
+            ctEl('customCountTag').textContent = String(total);
+        }
+
+        function renderCustomList() {
+            const list = ctEl('customList');
+            const kw = (ctEl('customFilter').value || '').trim().toLowerCase();
+            const visible = ctItems.filter(it => {
+                if (!kw) return true;
+                return (it.display_name || '').toLowerCase().includes(kw)
+                    || (it.description || '').toLowerCase().includes(kw)
+                    || (it.tool_name || '').toLowerCase().includes(kw)
+                    || (it.keywords || []).join(',').toLowerCase().includes(kw);
+            });
+            if (!visible.length) {
+                list.innerHTML = '<div class="empty" style="grid-column:1/-1">'
+                    + (ctItems.length ? '没有匹配的工具' : '还没有自定义工具，点「新建工具」开始（写好后可参考 docs/自定义工具开发指南.md）')
+                    + '</div>';
+                return;
+            }
+            let html = '';
+            for (const it of visible) {
+                const tn = escapeHtml(it.tool_name);
+                html += '<div class="tool-item ct-item" data-ct-item="' + tn + '">';
+                // 标题行
+                html += '<div class="ct-head">';
+                html += '<span class="ct-name">' + escapeHtml(it.display_name || it.tool_name) + '</span>';
+                if (it.enabled) {
+                    html += it.registered
+                        ? '<span class="adp-badge ok">已注册</span>'
+                        : '<span class="adp-badge warn">未注册</span>';
+                } else {
+                    html += '<span class="adp-badge">已禁用</span>';
+                }
+                if (it.permission === 'admin') html += '<span class="adp-badge warn">超管</span>';
+                else if (it.permission === 'global') html += '<span class="adp-badge">全局</span>';
+                else if (it.permission === 'disabled') html += '<span class="adp-badge">禁用</span>';
+                html += '</div>';
+                // 注册名
+                html += '<div class="ct-toolname">' + tn + '</div>';
+                // 描述
+                if (it.description) html += '<div class="ct-desc">' + escapeHtml(it.description) + '</div>';
+                // 元信息
+                const lr = it.last_run;
+                html += '<div class="ct-meta">';
+                html += '<span>超时 <b>' + (it.timeout || 30) + 's</b></span>';
+                html += '<span>权限 <b>' + (CT_PERM_LABEL[it.permission] || it.permission) + '</b></span>';
+                if (lr) {
+                    const ok = lr.status === 'success';
+                    html += '<span>上次 <b style="color:' + (ok ? 'var(--success)' : 'var(--danger)') + '">'
+                        + (ok ? '✅' : '❌') + ' ' + (lr.ms || 0) + 'ms</b></span>';
+                    html += '<span>' + ctFmtTime(lr.at) + '</span>';
+                } else {
+                    html += '<span>从未运行</span>';
+                }
+                html += '</div>';
+                // 操作
+                html += '<div class="ct-actions">';
+                html += '<button class="btn btn-ghost btn-xs" data-ct-act="edit">编辑</button>';
+                html += '<button class="btn btn-ghost btn-xs" data-ct-act="test">试跑</button>';
+                html += '<button class="btn btn-danger-ghost btn-xs" data-ct-act="del">删除</button>';
+                html += '</div>';
+                html += '</div>';
+            }
+            list.innerHTML = html;
+        }
+
+        // 列表事件委托（卡片内三个按钮）
+        ctEl('customList').addEventListener('click', async e => {
+            const btn = e.target.closest('[data-ct-act]');
+            if (!btn) return;
+            const card = btn.closest('[data-ct-item]');
+            if (!card) return;
+            const tn = card.dataset.ctItem;
+            const item = ctItems.find(x => x.tool_name === tn);
+            if (!item) return;
+            const act = btn.dataset.ctAct;
+            if (act === 'edit') openCustomDrawer(item);
+            else if (act === 'test') openCustomDrawer(item, true);
+            else if (act === 'del') await deleteCustomTool(item);
+        });
+
+        // ---------- 抽屉 ----------
+        function openCustomDrawer(item, focusTest) {
+            ctEditing = item ? item.tool_name : null;
+            ctEl('ctDrawerTitle').textContent = item ? '编辑自定义工具' : '新建自定义工具';
+            ctEl('ctDrawerSub').textContent = item
+                ? item.tool_name
+                : '写一个 Python 函数，AI 即可调用它';
+
+            ctEl('ctName').value = item ? (item.display_name || '') : '';
+            ctEl('ctDesc').value = item ? (item.description || '') : '';
+            ctEl('ctKeywords').value = item ? (item.keywords || []).join(', ') : '';
+            ctEl('ctCode').value = item ? (item.code || '') : '';
+            ctEl('ctPerm').value = item ? (item.permission || 'admin') : 'admin';
+            ctEl('ctTimeout').value = item ? (item.timeout || 30) : 30;
+            ctEl('ctEnabled').checked = item ? !!item.enabled : true;
+
+            ctEl('ctTestArgs').value = '';
+            ctEl('ctTestOut').style.display = 'none';
+            ctEl('ctTestMeta').textContent = '';
+            ctSetFoot('');
+            ctEl('ctCodeStatus').textContent = '';
+            ctEl('ctCodeStatus').className = 'ct-code-status';
+
+            ctUpdateToolnameHint();
+            ctUpdateCodeLines();
+            ctEl('ctMask').classList.add('show');
+            ctEl('ctDrawer').classList.add('show');
+
+            if (item && item.code) {
+                ctRenderParams(ctDeriveSchema(item.code));
+            } else {
+                ctEl('ctParamsBox').style.display = 'none';
+            }
+            // ★ 列表接口为了轻量**不返回 code**，必须再拉一次详情。
+            //   否则从列表点「编辑」打开的是空编辑器（有 custom_tool_get 却没人调）。
+            if (item && !item.code) ctLoadFullTool(item);
+
+            setTimeout(() => {
+                if (focusTest) ctEl('ctTestArgs').focus();
+                else ctEl('ctName').focus();
+            }, 260);
+        }
+
+        // 拉取单个工具的完整内容（含代码）并回填编辑器
+        async function ctLoadFullTool(item) {
+            if (ctPreview) {
+                // 预览模式：示例数据本身就带 code
+                if (item.code) {
+                    ctEl('ctCode').value = item.code;
+                    ctUpdateCodeLines();
+                    ctRenderParams(ctDeriveSchema(item.code));
+                }
+                return;
+            }
+            ctEl('ctCodeStatus').textContent = '正在加载代码…';
+            ctEl('ctCodeStatus').className = 'ct-code-status';
+            try {
+                const res = await ctGet('custom_tool_get', { tool_name: item.tool_name });
+                if (!res || !res.success || !res.tool) throw new Error((res && res.error) || '加载失败');
+                const t = res.tool;
+                ctEl('ctCode').value = t.code || '';
+                ctUpdateCodeLines();
+                ctRenderParams(ctDeriveSchema(t.code || ''));
+                ctEl('ctCodeStatus').textContent = '';
+            } catch (e) {
+                ctEl('ctCodeStatus').textContent = '✗ 加载代码失败：' + e.message;
+                ctEl('ctCodeStatus').className = 'ct-code-status bad';
+            }
+        }
+
+        function closeCustomDrawer() {
+            ctEl('ctMask').classList.remove('show');
+            ctEl('ctDrawer').classList.remove('show');
+            ctEditing = null;
+        }
+
+        ctEl('ctMask').addEventListener('click', closeCustomDrawer);
+        ctEl('ctCloseBtn').addEventListener('click', closeCustomDrawer);
+        ctEl('ctCancelBtn').addEventListener('click', closeCustomDrawer);
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && ctEl('ctDrawer').classList.contains('show')) closeCustomDrawer();
+        });
+
+        // ---------- 代码区 ----------
+        function ctUpdateCodeLines() {
+            const ta = ctEl('ctCode');
+            const n = ta.value.split('\n').length;
+            let s = '';
+            for (let i = 1; i <= n; i++) s += i + '\n';
+            const box = ctEl('ctCodeLines');
+            box.textContent = s;
+            box.scrollTop = ta.scrollTop;
+        }
+
+        // Tab 缩进 + 自动缩进（不拦截修饰键）
+        ctEl('ctCode').addEventListener('keydown', e => {
+            const ta = e.target;
+            if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault();
+                const s = ta.selectionStart, en = ta.selectionEnd;
+                if (s === en) {
+                    ta.value = ta.value.slice(0, s) + '    ' + ta.value.slice(en);
+                    ta.selectionStart = ta.selectionEnd = s + 4;
+                } else {
+                    // 多行：整块缩进 / 反缩进
+                    const head = ta.value.slice(0, s);
+                    const block = ta.value.slice(s, en);
+                    const rest = ta.value.slice(en);
+                    const ls = head.lastIndexOf('\n') + 1;
+                    const pre = ta.value.slice(ls, s);
+                    let lines = (pre + block).split('\n');
+                    if (e.shiftKey) {
+                        lines = lines.map(l => l.startsWith('    ') ? l.slice(4) : l.replace(/^\s{1,4}/, ''));
+                    } else {
+                        lines = lines.map(l => l.length || lines.length === 1 ? '    ' + l : l);
+                    }
+                    const nb = lines.join('\n');
+                    ta.value = ta.value.slice(0, ls) + nb + rest;
+                    ta.selectionStart = ls;
+                    ta.selectionEnd = ls + nb.length;
+                }
+                ctUpdateCodeLines();
+                ctScheduleIntrospect();
+            } else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+                const s = ta.selectionStart;
+                const before = ta.value.slice(0, s);
+                const line = before.slice(before.lastIndexOf('\n') + 1);
+                const ind = (line.match(/^\s*/) || [''])[0];
+                const extra = /[:\[({\\]\s*$/.test(line) ? '    ' : '';
+                if (ind || extra) {
+                    e.preventDefault();
+                    const ins = '\n' + ind + extra;
+                    ta.value = ta.value.slice(0, s) + ins + ta.value.slice(ta.selectionEnd);
+                    ta.selectionStart = ta.selectionEnd = s + ins.length;
+                    ctUpdateCodeLines();
+                    ctScheduleIntrospect();
+                }
+            }
+        });
+        ctEl('ctCode').addEventListener('input', () => {
+            ctUpdateCodeLines();
+            ctScheduleIntrospect();
+        });
+        ctEl('ctCode').addEventListener('scroll', () => {
+            ctEl('ctCodeLines').scrollTop = ctEl('ctCode').scrollTop;
+        });
+
+        ctEl('ctTplBtn').addEventListener('click', () => {
+            const ta = ctEl('ctCode');
+            if (ta.value.trim() && !confirm_soft()) return;
+            ta.value = CT_CODE_TPL;
+            ctUpdateCodeLines();
+            ctRenderParams(ctDeriveSchema(ta.value));
+        });
+        function confirm_soft() { return true; }   // 模板覆盖不阻断，用户可 Ctrl+Z
+
+        ctEl('ctIndentBtn').addEventListener('click', () => {
+            const ta = ctEl('ctCode');
+            // 简单的行尾空白清理 + Tab→空格（不动缩进结构，避免误伤）
+            ta.value = ta.value.split('\n').map(l => l.replace(/[ \t]+$/, '').replace(/^\t+/, m => '    '.repeat(m.length))).join('\n');
+            ctUpdateCodeLines();
+            ctScheduleIntrospect();
+        });
+
+        ctEl('ctIntrospectBtn').addEventListener('click', () => ctIntrospectNow());
+
+        function ctScheduleIntrospect() {
+            clearTimeout(ctIntroTimer);
+            ctIntroTimer = setTimeout(() => ctIntrospectNow(true), 700);
+        }
+
+        async function ctIntrospectNow(silent) {
+            const code = ctEl('ctCode').value;
+            const st = ctEl('ctCodeStatus');
+            if (!code.trim()) {
+                ctEl('ctParamsBox').style.display = 'none';
+                st.textContent = ''; st.className = 'ct-code-status';
+                return;
+            }
+            // 本地先算一版（即时反馈，不依赖后端）
+            const local = ctDeriveSchema(code);
+            ctRenderParams(local);
+            if (local.error) {
+                st.textContent = '✗ ' + local.error;
+                st.className = 'ct-code-status bad';
+            } else {
+                st.textContent = '✓ 入口函数 ' + local.entry + '，' + local.params.length + ' 个参数';
+                st.className = 'ct-code-status ok';
+            }
+            // 后端可用时再拿权威结果覆盖
+            try {
+                const res = await ctPost('custom_tool_introspect', {
+                    code: code, entry: local.entry || 'main'
+                });
+                if (res && res.success && res.schema) {
+                    ctRenderParams(res);
+                    st.textContent = '✓ 入口函数 ' + (res.entry || 'main') + '，'
+                        + ((res.params || []).length) + ' 个参数（已由后端校验）';
+                    st.className = 'ct-code-status ok';
+                }
+            } catch (e) { /* 后端未就绪：保留本地结果 */ }
+        }
+
+        // 从 Python 代码推导参数表（本地近似实现，用于即时预览）
+        function ctDeriveSchema(code) {
+            const out = { entry: 'main', params: [], error: null };
+            const fm = code.match(/^[ \t]*def[ \t]+(\w+)[ \t]*\(([\s\S]*?)\)[ \t]*(?:->[^:\n]*)?:/m);
+            if (!fm) { out.error = '未找到函数定义（需要 def 开头）'; return out; }
+            out.entry = fm[1];
+            const raw = fm[2].replace(/\n/g, ' ').trim();
+            // docstring 参数说明
+            const doc = code.match(/^[ \t]*(?:def[^\n]*\n[ \t]*)?("""|''')([\s\S]*?)\1/m);
+            const descMap = {};
+            if (doc) {
+                const body = doc[2];
+                const am = body.match(/Args:[ \t]*\n([\s\S]*)/);
+                if (am) {
+                    for (const line of am[1].split('\n')) {
+                        const mm = line.match(/^[ \t]*(\w+)[ \t]*\(([^)]*)\)[ \t]*:[ \t]*(.+)$/);
+                        if (mm) descMap[mm[1]] = { type: mm[2].trim(), desc: mm[3].trim() };
+                    }
+                }
+            }
+            const TMAP = { str: 'string', int: 'integer', float: 'number', bool: 'boolean',
+                           list: 'array', dict: 'object', string: 'string', integer: 'integer',
+                           number: 'number', boolean: 'boolean', array: 'array', object: 'object' };
+            if (raw) {
+                for (let part of raw.split(',')) {
+                    part = part.trim();
+                    if (!part || part === 'self') continue;
+                    const nm = part.match(/^(\w+)/);
+                    if (!nm) continue;
+                    const name = nm[1];
+                    const hasDefault = /\s=\s/.test(part.replace(/^[^=]*:/, ':'));
+                    const annM = part.match(/^\w+[ \t]*:[ \t]*([\w.\[\]]+)/);
+                    const ann = annM ? annM[1].replace(/\[.*\]/, '') : '';
+                    const d = descMap[name] || {};
+                    const jt = TMAP[(d.type || ann || '').toLowerCase()] || 'string';
+                    out.params.push({
+                        name: name,
+                        type: jt,
+                        required: !hasDefault,
+                        desc: d.desc || (ann ? '（类型注解：' + ann + '）' : '（未写说明，建议补充 Args: 段）')
+                    });
+                }
+            }
+            if (out.params.length === 0 && raw) {
+                out.error = null;   // 无参数也合法
+            }
+            const missing = out.params.filter(p => !p.desc || p.desc.startsWith('（未写说明'));
+            if (missing.length && !out.error) {
+                out.warn = '有 ' + missing.length + ' 个参数没写 Args: 说明，AI 可能传错值';
+            }
+            return out;
+        }
+
+        function ctRenderParams(res) {
+            const box = ctEl('ctParamsBox');
+            const list = ctEl('ctParamsList');
+            if (!res || (!res.params || !res.params.length)) {
+                if (res && res.error) {
+                    box.style.display = 'block';
+                    list.innerHTML = '<div class="ct-param-row" style="color:var(--danger)">'
+                        + escapeHtml(res.error) + '</div>';
+                } else {
+                    box.style.display = 'block';
+                    list.innerHTML = '<div class="ct-param-row" style="color:var(--text-3)">该函数无参数，AI 调用时不需要传参</div>';
+                }
+                return;
+            }
+            box.style.display = 'block';
+            let html = '';
+            for (const p of res.params) {
+                html += '<div class="ct-param-row">';
+                html += '<span class="ct-param-name">' + escapeHtml(p.name) + '</span>';
+                html += '<span class="ct-param-type">' + escapeHtml(p.type) + '</span>';
+                html += p.required
+                    ? '<span class="ct-param-req">必填</span>'
+                    : '<span class="ct-param-opt">可选</span>';
+                html += '<span class="ct-param-desc">' + escapeHtml(p.desc || '') + '</span>';
+                html += '</div>';
+            }
+            if (res.warn) html += '<div class="ct-param-row" style="color:var(--warn)">⚠ ' + escapeHtml(res.warn) + '</div>';
+            list.innerHTML = html;
+        }
+
+        // ---------- 注册名提示 ----------
+        function ctUpdateToolnameHint() {
+            const n = (ctEl('ctName').value || '').trim();
+            const hint = ctEl('ctToolnameHint');
+            if (!n) { hint.textContent = '注册名将在填写后生成'; return; }
+            if (ctEditing) { hint.textContent = '注册名：' + ctEditing; return; }
+            const ascii = /^[\x00-\x7F]*$/.test(n);
+            let slug = ascii
+                ? n.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+                : '（中文将转拼音）';
+            hint.textContent = '注册名：Wyc_custom_tool_' + (slug || 'xxx');
+        }
+        ctEl('ctName').addEventListener('input', ctUpdateToolnameHint);
+
+        // ---------- 保存 ----------
+        ctEl('ctSaveBtn').addEventListener('click', async () => {
+            const name = (ctEl('ctName').value || '').trim();
+            const desc = (ctEl('ctDesc').value || '').trim();
+            const code = ctEl('ctCode').value;
+            if (!name) { ctSetFoot('请填写名称', 'error'); ctEl('ctName').focus(); return; }
+            if (!desc) { ctSetFoot('请填写描述（AI 靠它判断何时调用）', 'error'); ctEl('ctDesc').focus(); return; }
+            if (!code.trim()) { ctSetFoot('请填写代码', 'error'); ctEl('ctCode').focus(); return; }
+
+            const local = ctDeriveSchema(code);
+            if (local.error) { ctSetFoot('代码有误：' + local.error, 'error'); return; }
+
+            const payload = {
+                tool_name: ctEditing,
+                display_name: name,
+                description: desc,
+                keywords: (ctEl('ctKeywords').value || '').split(',').map(s => s.trim()).filter(Boolean),
+                code: code,
+                entry: local.entry,
+                permission: ctEl('ctPerm').value,
+                timeout: parseInt(ctEl('ctTimeout').value, 10) || 30,
+                enabled: ctEl('ctEnabled').checked
+            };
+
+            if (ctPreview) {
+                // 预览模式：仅本地演示，不写盘
+                const item = Object.assign({ tool_name: payload.tool_name || ('Wyc_custom_tool_' + name), registered: payload.enabled }, payload);
+                const i = ctItems.findIndex(x => x.tool_name === item.tool_name);
+                if (i >= 0) ctItems[i] = item; else ctItems.push(item);
+                renderCustomList(); ctUpdateStat(); closeCustomDrawer();
+                ctShowStatus('【预览模式】未真正保存。接口接入后此处会写入 custom_tools.json', 'success');
+                return;
+            }
+
+            ctSetFoot('保存中…');
+            try {
+                const res = await ctPost('custom_tool_save', { tool: payload });
+                if (!res || !res.success) throw new Error((res && res.error) || '保存失败');
+                closeCustomDrawer();
+                ctShowStatus(res.message || '已保存并注册', 'success');
+                loadCustomTools();
+            } catch (e) {
+                ctSetFoot(e.message, 'error');
+            }
+        });
+
+        // ---------- 删除 ----------
+        async function deleteCustomTool(item) {
+            const ok = await askConfirm(
+                '确定删除自定义工具「' + (item.display_name || item.tool_name) + '」？\n删除后 AI 将无法再调用它。',
+                { title: '删除自定义工具' }
+            );
+            if (!ok) return;
+            if (ctPreview) {
+                ctItems = ctItems.filter(x => x.tool_name !== item.tool_name);
+                renderCustomList(); ctUpdateStat();
+                ctShowStatus('【预览模式】未真正删除', 'success');
+                return;
+            }
+            try {
+                const res = await ctPost('custom_tool_delete', { tool_name: item.tool_name });
+                if (!res || !res.success) throw new Error((res && res.error) || '删除失败');
+                ctShowStatus('已删除', 'success');
+                loadCustomTools();
+            } catch (e) {
+                ctShowStatus('删除失败：' + e.message, 'error');
+            }
+        }
+
+        // ---------- 试运行 ----------
+        ctEl('ctTestBtn').addEventListener('click', async () => {
+            const code = ctEl('ctCode').value;
+            const out = ctEl('ctTestOut');
+            const meta = ctEl('ctTestMeta');
+            if (!code.trim()) { ctSetFoot('请先填写代码', 'error'); return; }
+            let args = {};
+            const rawArgs = (ctEl('ctTestArgs').value || '').trim();
+            if (rawArgs) {
+                try { args = JSON.parse(rawArgs); }
+                catch (e) { ctSetFoot('参数不是合法 JSON', 'error'); return; }
+            }
+            const local = ctDeriveSchema(code);
+            out.style.display = 'block';
+            meta.textContent = '运行中…';
+
+            if (ctPreview) {
+                // 预览模式：模拟一次运行结果
+                setTimeout(() => {
+                    const missing = local.params.filter(p => p.required && !(p.name in args));
+                    out.className = 'ct-run-out ' + (missing.length ? 'err' : 'ok');
+                    out.innerHTML = '<div class="ct-run-meta">【预览模式】未真正执行 · 耗时 3ms</div>'
+                        + (missing.length
+                            ? escapeHtml('缺少必填参数：' + missing.map(p => p.name).join(', '))
+                            : escapeHtml('{\n  "status": "success",\n  "message": "（预览模式）这里会显示真实执行结果"\n}'));
+                    meta.textContent = '3ms · 预览模式';
+                }, 320);
+                return;
+            }
+
+            try {
+                const res = await ctPost('custom_tool_test', {
+                    tool_name: ctEditing, code: code, entry: local.entry, args: args
+                });
+                if (!res || !res.success) throw new Error((res && res.error) || '运行失败');
+                const ok = res.status === 'success';
+                out.className = 'ct-run-out ' + (ok ? 'ok' : 'err');
+                let body = '';
+                if (res.message) body += res.message;
+                if (res.stderr) body += '\n\n[stderr]\n' + res.stderr;
+                out.innerHTML = '<div class="ct-run-meta">耗时 ' + (res.ms || 0) + 'ms</div>' + escapeHtml(body);
+                meta.textContent = (res.ms || 0) + 'ms';
+            } catch (e) {
+                out.className = 'ct-run-out err';
+                out.textContent = e.message;
+                meta.textContent = '';
+            }
+        });
+
+        // ---------- 页面按钮 ----------
+        ctEl('customRefreshBtn').addEventListener('click', loadCustomTools);
+        ctEl('customFilter').addEventListener('input', renderCustomList);
+        ctEl('customNewBtn').addEventListener('click', () => openCustomDrawer(null));
+
+        // 「使用说明」里的复制提示词
+        (function () {
+            const btn = ctEl('ctGuideCopyBtn');
+            const ok = ctEl('ctGuideCopyOk');
+            const ta = ctEl('ctGuidePrompt');
+            if (!btn || !ta) return;
+            btn.addEventListener('click', async () => {
+                let done = false;
+                try {
+                    // navigator.clipboard 在 iframe 里可能被沙箱拦，失败则降级
+                    await navigator.clipboard.writeText(ta.value);
+                    done = true;
+                } catch (e) {
+                    done = false;
+                }
+                if (!done) {
+                    try {
+                        ta.removeAttribute('readonly');
+                        ta.select();
+                        ta.setSelectionRange(0, ta.value.length);
+                        done = document.execCommand('copy');
+                        ta.setAttribute('readonly', 'readonly');
+                    } catch (e) {
+                        done = false;
+                    }
+                }
+                if (ok) {
+                    ok.textContent = done ? '已复制，去粘贴给 AI 吧' : '复制失败，请手动全选复制';
+                    setTimeout(() => { ok.textContent = ''; }, 4000);
+                }
+            });
+        })();
 
         // ==================== 初始化 ====================
         (async () => {

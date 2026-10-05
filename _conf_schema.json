@@ -974,5 +974,35 @@
     "type": "bool",
     "default": true,
     "hint": "开启后run_python_code执行完毕会自动检测新生成的图片文件，提示LLM使用read_image查看"
+  },
+  "custom_tools_enabled": {
+    "description": "启用自定义 Python 函数工具",
+    "type": "bool",
+    "default": false,
+    "hint": "允许在 WebUI 里编写 Python 函数并注册为 AI 可调用的工具。⚠️ 可执行任意 Python 代码（在隔离子进程中运行，带资源限制与超时），风险等级等同于 run_python_code 工具，默认关闭。"
+  },
+  "custom_tools_allow_global": {
+    "description": "允许把自定义工具设为「全局」档",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时所有自定义工具强制「超管」档且不可降档。开启前请确认所有能触发 AI 的用户都是可信的。"
+  },
+  "custom_tools_max_concurrency": {
+    "description": "自定义工具最大并发执行数",
+    "type": "int",
+    "default": 3,
+    "hint": "同时执行的自定义工具数量上限，防止并发过多拖垮服务器。"
+  },
+  "custom_tools_timeout_max": {
+    "description": "自定义工具最长执行时间（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "单个自定义工具的执行时间上限。实际生效值还会被 AstrBot 全局「工具调用超时时间」钳制（自动预留 12 秒收尾余量）。"
+  },
+  "custom_tools_webui_admins": {
+    "description": "允许操作自定义工具的 WebUI 用户名白名单",
+    "type": "list",
+    "default": [],
+    "hint": "留空表示任意已登录的 WebUI 用户都可操作（与插件其他页签一致）。填写后仅白名单内的用户名可保存/删除/试运行自定义工具。"
   }
 }

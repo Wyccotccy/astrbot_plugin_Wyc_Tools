@@ -11,10 +11,10 @@
 > **升级 / 重装不丢数据，无需手动迁移**。本文档历史更新日志中出现的
 > `qzone_tools` 均指本插件旧名。
 
-为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
+为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **110 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.8.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.9.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -51,7 +51,7 @@
 | 🤖 **AI 声聊** | QQ 官方免费 TTS，指定角色发送语音 |
 | 🌐 **浏览器自动化** | 坐标交互（点击/双击/右键/长按/拖拽/悬停/输入）、搜索、标签页、收藏夹、反风控伪装 |
 | 🧪 **工作区** | Python 代码执行（AST 沙箱）、文件读写、图片生成与发送 |
-| 🛡️ **权限控制** | 109 个工具逐一配置 `global/admin/disabled`，63 个敏感工具默认仅管理员可用 |
+| 🛡️ **权限控制** | 110 个工具逐一配置 `global/admin/disabled`，63 个敏感工具默认仅管理员可用 |
 | 🔎 **工具调优** | 为任意工具**补充搜索词**、自定义**返回文案**（WebUI 可视化编辑） |
 | 🔒 **隐私模式** | 群号/QQ号 SHA1 不可逆脱敏，LLM 看不到真实 ID |
 | ⚡ **稳定性** | 全部 NapCat API 带超时、异步无阻塞、后台任务防回收、浏览器空闲自动回收 |
@@ -83,7 +83,7 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 
 ### 三步工具调用机制（LLM 必读）
 
-插件共有 109 个工具，**不会一次性全部注入上下文**（那会浪费大量 token）。LLM 必须遵循三步流程：
+插件共有 110 个工具，**不会一次性全部注入上下文**（那会浪费大量 token）。LLM 必须遵循三步流程：
 
 ```
 第 1 步：search_wyc_tools("关键词")      ← 用简短关键词搜索，禁止用完整问句
@@ -247,7 +247,7 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 ## 完整工具列表
 
 <details>
-<summary><b>展开全部 109 个工具</b></summary>
+<summary><b>展开全部 110 个工具</b></summary>
 
 ### 记忆管理（5）
 `add_memory` · `search_memories` · `update_memory` · `delete_memory` · `get_memory_detail`
@@ -268,7 +268,7 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 ### 联系人（3）
 `search_contacts` · `list_contacts` · `get_user_group_role`
 
-### 群管理（25）
+### 群管理（20）
 `set_group_ban` · `set_group_kick` · `set_group_whole_ban` · `set_group_card` · `set_group_admin`
 `set_group_name` · `set_group_special_title` · `set_group_add_option` · `set_group_portrait`
 `send_group_notice` · `delete_group_notice` · `get_group_notice_list`
@@ -288,9 +288,9 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 ### 历史消息（2）
 `get_group_msg_history` · `get_friend_msg_history`
 
-### 闪传（8）
+### 闪传（7）
 `create_flash_task` · `get_flash_file_list` · `get_flash_file_url` · `send_flash_msg`
-`get_fileset_info` · `get_fileset_id` · `download_fileset` · `send_flash_msg`
+`get_fileset_info` · `get_fileset_id` · `download_fileset`
 
 ### 在线文件（6）
 `get_online_file_msg` · `send_online_file` · `send_online_folder`
@@ -299,10 +299,10 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 ### 好友管理（1）
 `delete_friend`
 
-### 工作区（5）
+### 工作区（6）
 `run_python_code` · `list_workspace_files` · `read_workspace_file` · `read_image` · `send_file` · `delete_workspace_file`
 
-### 浏览器（26）
+### 浏览器（29）
 **坐标交互**：`browser_click` · `browser_double_click` · `browser_right_click` · `browser_long_press` · `browser_drag` · `browser_input_at` · `browser_hover` · `browser_wait`
 
 **页面操作**：`browser_search` · `browser_visit` · `browser_input` · `browser_scroll` · `browser_zoom` · `browser_screenshot` · `browser_back` · `browser_forward` · `browser_tabs` · `browser_close_tab` · `browser_close` · `browser_chat`
@@ -310,6 +310,8 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 **收藏夹**：`browser_favorite_list` · `browser_favorite_add` · `browser_favorite_delete`
 
 **其他**：`fetch_url` · `browser_install` · `open_page` · `screenshot_page` · `close_page`
+
+**接管**：`request_browser_takeover`（AI 卡在验证码时转交真人操作，免搜索直连）
 
 </details>
 
@@ -319,7 +321,7 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 
 ## 配置说明
 
-WebUI → 插件 → 更多LLM工具 → 配置页。共 **164 个配置项**，常用项：
+WebUI → 插件 → 更多LLM工具 → 配置页。共 **175 个配置项**，常用项：
 
 ### 基础
 
@@ -519,7 +521,29 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-### v5.8.2 — 修复「用户发图→发空间」绕路（路径白名单过严）
+### v5.9.0 — 自定义 Python 函数工具
+
+用 Python 写自己的工具函数，保存后 AI 即可搜索并调用。
+
+📖 **完整文档**：<https://wyctools.wyccotccy.cn> ｜ 离线版 [docs/自定义工具开发指南.md](docs/自定义工具开发指南.md)
+（含可直接喂给外部 AI 的规格说明）
+
+- **自定义函数工具**：写 `def main(...)` + docstring，保存即注册为 `Wyc_custom_tool_*`，
+  AI 通过 `search_wyc_tools` → `run_wyc_tool` 调用
+- **隔离子进程执行**：`-I -B` + RLIMIT（CPU/内存/文件/进程数）+ env 白名单 + 超时强杀
+- **参数表自动推导**：从函数签名 + docstring `Args:` 段生成 JSON Schema，保存前先校验
+- **默认超管且不可降档**：安全硬下限，除非管理员显式开启 `custom_tools_allow_global`
+- **开发文档**：在线版 11 章（含 20+ 完整示例、调试与排错、速查参考）；
+  离线版 `docs/自定义工具开发指南.md` —— 规范、示例、调试技巧，
+  以及一段可直接复制给 ChatGPT/Claude 等外部 AI 的提示词
+- 🐛 修复：动态注册工具的 `enable_*` 开关重启后失效（适配器工具一并受益）
+- 🐛 补上 `requirements.txt` 缺失的 `pypinyin`（适配器中文命令命名依赖它）
+
+> ⚠️ **安全声明**：自定义工具可执行任意 Python 代码（在隔离子进程中运行，带资源限制与超时），
+> 风险等级等同于既有的 `run_python_code` 工具。防护为**静态检测 + 进程隔离**，
+> **不等同于内核级安全沙箱**。该功能默认关闭，且注册的工具默认仅「超管」可用。
+
+### v5.8.3 — 修复「用户发图→发空间」绕路（路径白名单过严）
 
 **现象**（真机日志）：用户发了张图让它发空间，结果绕了三轮才成功 ——
 先被拒、再分别尝试 `shutil` 和 `open('/AstrBot/...')`（均被沙箱拦），
@@ -612,7 +636,7 @@ AI 可调用的 wyc-tools 工具，WebUI 勾选即生效。
   `Wyc_assistive_tool_<插件名>_<工具名>`；中文命令自动转拼音；
   **默认全部关闭**，未勾选绝不注册
 - **适配器权限控制页**：对已注册的适配器工具单独设权限档位（四档），
-  与既有 109 个工具的权限表合并保存；源命令带管理员门槛的默认「超管」档
+  与既有 110 个工具的权限表合并保存；源命令带管理员门槛的默认「超管」档
 - **AI 调用**：经 search_wyc_tools → run_wyc_tool 三步协议，
   支持框架带参指令（自动类型转换）与自行解析 message_str 两类命令，
   协程 / 异步生成器两种 handler 形态均可执行

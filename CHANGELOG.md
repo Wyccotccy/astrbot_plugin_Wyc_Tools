@@ -1,3 +1,116 @@
+## [5.9.0] - 2026-10-05
+
+### ✨ 新增：自定义 Python 函数工具（WebUI 可写）
+
+用户在 WebUI 里写一个 Python 函数，保存后即注册为 AI 可调用的工具。
+
+**工具形态**：
+
+```python
+def main(city: str, days: int = 1) -> dict:
+    """查询指定城市的实时天气。
+
+    Args:
+        city(string): 城市名，如「北京」
+        days(integer): 查询未来几天，默认 1
+    """
+    return {"status": "success", "message": f"{city} 晴"}
+```
+
+- 工具名 `Wyc_custom_tool_<拼音/规范化名>`，与内置工具（无前缀）、
+  适配器工具（`Wyc_assistive_tool_`）天然隔离
+- **参数表从函数签名 + docstring 的 `Args:` 段自动推导**，无需手写 JSON Schema
+- 返回值支持 `dict`（`{status, message, screenshot?}`）或 `str`，也支持 `async def main`
+- 提供 `wyc` 辅助对象：`wyc.log()` / `wyc.workspace` / `wyc.image(path)`
+
+**执行隔离**（核心）：
+
+| 手段 | 实现 |
+|------|------|
+| 静态检测 | 复用既有 AST + 正则双层检测（禁 import os/subprocess/eval 等） |
+| 进程隔离 | `sys.executable -I -B core/custom_runner.py`（`-I` 隔离模式） |
+| 资源限制 | `RLIMIT_CPU` / `AS=2GB` / `FSIZE=100MB` / `NPROC=64` |
+| 环境隔离 | env 白名单，不继承任何密钥/代理/token |
+| 超时强杀 | `asyncio.wait_for` + `proc.kill()`，且钳制到框架超时 -12s |
+| 受限 builtins | 子进程侧显式白名单，**不提供** eval/exec/compile/globals |
+| 协议保护 | stdout 专用于 JSON 协议，用户 `print` 被重定向到 stderr |
+
+**保存前强制校验**：结构 → 静态检测 → 子进程试加载（能 exec / 入口函数存在 /
+schema 可推导）→ 才落盘。把「存进去却跑不起来」挡在保存这一刻。
+
+**权限**：默认「超管」档且**不可降档**（硬下限，同适配器高危工具的机制），
+除非管理员显式开启 `custom_tools_allow_global`。功能总开关 `custom_tools_enabled` 默认**关闭**。
+
+### ✨ 新增：面向用户的开发文档
+
+在线版：<https://wyctools.wyccotccy.cn>（11 章，可搜索）
+离线版：`docs/自定义工具开发指南.md`（约 700 行）
+
+让用户能自己（或借助外部 AI）写工具。
+
+- **规范说明**：入口函数、docstring `Args:` 段格式（最易错的地方）、返回值、参数类型对照表
+- **运行环境**：可用库清单（实测容器内 46 个库全可用）、文件操作、`wyc` 辅助对象
+- **硬约束**：禁用模块/函数/路径、资源限制、网络访问说明
+- **给外部 AI 的提示词**：一段可直接复制给 ChatGPT / Claude / DeepSeek 的规格说明，
+  用户描述需求即得可用代码 —— 把「代码生成」交给用户自己的 AI，插件不背这个维护成本
+- **完整示例**：在线版 20 个（离线版 5 个）—— 公开 API 调用、计算、文件处理、
+  matplotlib 画图、正则提取、并发请求、CSV 统计等
+- **调试与排错**：试运行技巧、`wyc.log` 用法、参数预览、常见错误对照表、中英文标点坑
+- **让 AI 更爱用的技巧**：描述写法、搜索词填法、参数精简
+
+同时给执行器补上中文字体注册（对齐 `run_python_code` 的既有行为）——
+此前自定义工具里用 matplotlib 画图时中文会显示成方块。
+
+### 🐛 修复（既有隐患）
+
+#### 1. 动态注册工具的 `enable_*` 开关重启后失效
+
+`_load_tool_enabled_flags()` 只遍历**硬编码**的 `default_enabled` 字典，
+而适配器工具/自定义工具是运行时动态注册的，其 `enable_xxx=false` 读不到。
+更隐蔽的是：`self.tool_enabled` 在 `_tool_registry` 构建**之前**就已赋值，
+即便扩展了遍历也看不到任何动态条目。
+
+修复：`__init__` 在两个 `_rebuild_*_tools()` 之后**重新加载一次**开关。
+适配器工具一并受益。
+
+#### 2. `requirements.txt` 缺少 `pypinyin`
+
+`main.py` 一直在用 `from pypinyin import lazy_pinyin`（适配器中文命令名转拼音），
+但依赖未声明 —— 市场用户安装后会走 `except` 兜底分支，中文命令的命名退化。
+
+### ✅ 验证
+
+| 层次 | 内容 | 结果 |
+|------|------|------|
+| 执行器协议 | 24 项（schema 推导 / dict / str / async / 异常 / 超时 / 禁用 import / eval / 截断 / screenshot 过滤 / 编码） | **24/24** |
+| 后端集成 | 69 项（校验 / 命名 / 持久化容错 / 注册幂等 / 权限硬下限 / 超时钳制 / AI 解析 / 限流 / 名单一致性 / 真实子进程端到端） | **69/69** |
+| 前端 | JS 语法 / id 引用差集 / 标签配对 / 前后端契约（8 端点 + 10 字段） | 全部通过 |
+
+**实现中发现并修复的真实缺陷**：
+
+1. **协议编码**：宿主用 `-I` 启动执行器，而 `-I` 隐含 `-E`（忽略所有 `PYTHON*`
+   环境变量），导致 `PYTHONIOENCODING=utf-8` 完全无效、stdout 退回系统 locale 编码。
+   在非 UTF-8 locale 下含中文的 JSON 会变成乱码。修复：执行器内显式 `reconfigure(encoding="utf-8")`。
+2. **message 类型**：用户写 `{"message": 42}`（忘了转 str）时，宿主侧下游
+   （隐私脱敏 / 自定义文案 / base64 护栏）都要求 `isinstance(x, str)`，
+   类型不对会被**静默跳过** —— 脱敏失效且无任何报错。修复：执行器侧规范化。
+3. **编辑回填**：列表接口为轻量不返回 `code`，而前端 `openCustomDrawer` 直接读 `item.code`，
+   导致从列表点「编辑」打开的是**空编辑器**。修复：改为再拉一次 `custom_tool_get`。
+4. **重复 assistant 消息**：补丁失败重试时手动又拼了一条 assistant 消息，
+   而占位消息已在历史里 —— 造成连续两条 assistant，部分 provider 直接报错。
+5. **空 prompt**：`text_chat(prompt="")` 在部分 provider 上会 400。
+   修复：把最后一条 user 消息提为 `prompt`，其余作为 `context`。
+
+### ⚠️ 安全声明
+
+自定义工具可执行任意 Python 代码。防护为**静态检测 + 进程隔离 + 资源限制**，
+**不等同于内核级安全沙箱**（无 seccomp / namespace），无法完全阻止有意的逃逸尝试。
+风险等级与既有的 `run_python_code` 工具相同。
+
+建议：仅在受信任的环境启用；不要给不可信用户开放「全局」档位；不要在本功能里存放任何密钥。
+
+---
+
 ## [5.8.3] - 2026-10-04
 
 ### 🐛 修复（真机日志暴露：路径白名单过严）
