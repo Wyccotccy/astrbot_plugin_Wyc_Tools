@@ -1167,6 +1167,27 @@
                             <input type="checkbox" id="memory_inject_enabled" />
                             <label class="switch-text" for="memory_inject_enabled"><span class="t">启用记忆自动注入</span><span class="d">每次对话自动注入该用户最新记忆（临时内容，不写入会话历史）</span></label>
                         </div>
+                        <div class="switch-row">
+                            <input type="checkbox" id="memory_api_enabled" />
+                            <label class="switch-text" for="memory_api_enabled"><span class="t">启用记忆外部 API</span><span class="d">启动独立 HTTP 服务，外部程序传 QQ 号即可拉取该用户的全部记忆（需先设置下方访问令牌，否则所有请求被拒）</span></label>
+                        </div>
+                        <div class="two-col">
+                            <div class="field">
+                                <label>API 监听地址</label>
+                                <input type="text" id="memory_api_host" />
+                                <div class="hint">0.0.0.0 允许局域网/外网访问；仅本机调用改 127.0.0.1</div>
+                            </div>
+                            <div class="field">
+                                <label>API 端口</label>
+                                <input type="number" id="memory_api_port" />
+                                <div class="hint">默认 6190，避免与 WebUI(6185) 冲突</div>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label>API 访问令牌</label>
+                            <input type="password" id="memory_api_token" autocomplete="new-password" />
+                            <div class="hint">调用时通过请求头 Authorization: Bearer 令牌 或 URL 参数 ?token=令牌 传入；修改后保存即生效</div>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -2596,6 +2617,11 @@ if (!window.AstrBotPluginPage) {
                 max_memories_per_user: num('max_memories_per_user', 100),
                 max_inject_memories: num('max_inject_memories', 5),
                 memory_inject_enabled: checked('memory_inject_enabled'),
+                // 记忆外部 API：令牌留空表示"不修改"，回传掩码让后端保留原值
+                memory_api_enabled: checked('memory_api_enabled'),
+                memory_api_host: val('memory_api_host'),
+                memory_api_port: num('memory_api_port', 6190),
+                memory_api_token: (document.getElementById('memory_api_token').value.trim() === '' ? '***' : document.getElementById('memory_api_token').value),
                 ai_voice_default_character: val('ai_voice_default_character'),
                 ai_voice_max_text_length: num('ai_voice_max_text_length', 500),
                 auto_input_status_enabled: checked('auto_input_status_enabled'),

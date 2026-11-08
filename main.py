@@ -3,6 +3,7 @@ import asyncio
 import copy
 import functools
 import hashlib
+import hmac
 import inspect
 import json
 import os
@@ -23,6 +24,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlencode, quote as url_quote, urljoin
 
 import aiohttp
+from aiohttp import web
 import ipaddress
 from pathlib import Path
 from quart import jsonify, request
@@ -76,6 +78,8 @@ DEFAULT_SSRF_BLACKLIST = [
 CONFIG_SAVE_WHITELIST = {
     "email_sender", "email_authorization_code", "email_smtp_server", "email_smtp_port",
     "max_memories_per_user", "max_inject_memories", "memory_inject_enabled",
+    # 记忆外部 API（v5.10.0）
+    "memory_api_enabled", "memory_api_host", "memory_api_port", "memory_api_token",
     "max_output_chars", "search_max_chars",
     "ai_voice_default_character", "ai_voice_max_text_length",
     "auto_input_status_enabled", "auto_input_status_timeout",
@@ -115,7 +119,7 @@ CONFIG_SAVE_WHITELIST = {
 
 
 # WebUI 返回配置时需要脱敏的字段（保存时若回传掩码则保留原值）
-SENSITIVE_FIELDS = {"email_authorization_code"}
+SENSITIVE_FIELDS = {"email_authorization_code", "memory_api_token"}
 
 # 掩码占位符 — 前端回传此值时视为"未修改"
 MASK_PLACEHOLDER = "***"
@@ -711,6 +715,135 @@ class MemoryManager:
             if added:
                 self._save_data({"memories": memories})
             return added, skipped
+
+
+class MemoryApiServer:
+    """记忆外部 API 服务（v5.10.0）
+
+    独立轻量 HTTP 服务：外部程序传 QQ 号即可拉取该用户的全部记忆。
+    - 为什么不挂 AstrBot 的 register_web_api：那些路由挂在 WebUI 仪表盘
+      /api/* 之下，受 JWT 登录鉴权保护，外部脚本无法直接调用；而 AstrBot v5
+      的 Open API 是固定端点集（chat/im/config），插件无法注册新端点 ——
+      所以只能自建 HTTP 服务。
+    - 端点：GET /memories?user_id=<QQ号>[&keyword=xx][&limit=N]
+    - 安全：必须配置 memory_api_token 才放行（Bearer 头或 ?token= 均可，
+      恒时比较防时序侧信道）；token 未配置时所有请求一律 403。
+    - 配置引用插件主 config 字典，token 改动即时生效；host/port/enabled
+      变化需由外部调用 restart（见 QzoneTools._sync_memory_api_server）。
+    """
+
+    # 单次返回上限：防止 limit 参数被滥用来打爆内存（记忆本身有每用户上限兜底）
+    MAX_LIMIT = 100000
+
+    def __init__(self, memory_manager: "MemoryManager", config: dict):
+        self.memory_manager = memory_manager
+        self.config = config  # 直接引用主配置：token 热改即时生效
+        self._runner: Optional[web.AppRunner] = None
+        self.host: str = ""
+        self.port: int = 0
+
+    @property
+    def token(self) -> str:
+        return str(self.config.get("memory_api_token", "") or "").strip()
+
+    def _check_token(self, request: "web.Request") -> bool:
+        expected = self.token
+        if not expected:
+            return False  # 未配置令牌 = 一律拒绝
+        supplied = ""
+        auth = request.headers.get("Authorization", "").strip()
+        if auth.startswith("Bearer "):
+            supplied = auth[len("Bearer "):].strip()
+        elif auth.startswith("ApiKey "):
+            supplied = auth[len("ApiKey "):].strip()
+        if not supplied:
+            supplied = str(request.query.get("token", "") or "").strip()
+        # 编码成 bytes 再比较：compare_digest 对非 ASCII 字符串会抛 TypeError
+        return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+    async def _handle_memories(self, request: "web.Request"):
+        if not self._check_token(request):
+            reason = (
+                "服务未配置访问令牌（memory_api_token），已拒绝访问"
+                if not self.token else "访问令牌无效"
+            )
+            return web.json_response(
+                {"success": False, "error": reason},
+                status=403,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        user_id = str(request.query.get("user_id", "") or "").strip()
+        if not user_id:
+            return web.json_response(
+                {"success": False, "error": "缺少 user_id 参数（QQ 号）"},
+                status=400,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        keyword = str(request.query.get("keyword", "") or "").strip() or None
+        try:
+            limit = int(request.query.get("limit", "0") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0 or limit > self.MAX_LIMIT:
+            limit = self.MAX_LIMIT  # 不传 limit = 拉取全部
+        memories = await self.memory_manager.get_memories(
+            user_id=user_id, keyword=keyword, limit=limit
+        )
+        return web.json_response(
+            {
+                "success": True,
+                "user_id": user_id,
+                "keyword": keyword,
+                "count": len(memories),
+                "memories": memories,
+            },
+            dumps=lambda d: json.dumps(d, ensure_ascii=False),
+        )
+
+    async def start(self):
+        """启动服务。可重复调用（幂等）；端口占用抛异常由调用方处理。"""
+        if self._runner is not None:
+            return
+        self.host = str(self.config.get("memory_api_host", "0.0.0.0") or "0.0.0.0").strip() or "0.0.0.0"
+        try:
+            self.port = int(self.config.get("memory_api_port", 6190))
+        except (TypeError, ValueError):
+            self.port = 6190
+        if self.port <= 0 or self.port > 65535:
+            self.port = 6190
+        app = web.Application()
+        app.router.add_get("/memories", self._handle_memories)
+        app.router.add_get("/", self._handle_index)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        self._runner = runner
+
+    async def _handle_index(self, request: "web.Request"):
+        """根路径：返回简短的用法说明，方便外部调用者自省（同样需要令牌）。"""
+        if not self._check_token(request):
+            return web.json_response(
+                {"success": False, "error": "访问令牌无效"},
+                status=403,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        return web.json_response(
+            {
+                "success": True,
+                "usage": "GET /memories?user_id=<QQ号>[&keyword=关键词][&limit=N]",
+                "auth": "请求头 Authorization: Bearer <token> 或 URL 参数 ?token=<token>",
+            },
+            dumps=lambda d: json.dumps(d, ensure_ascii=False),
+        )
+
+    async def stop(self):
+        if self._runner is not None:
+            try:
+                await self._runner.cleanup()
+            except Exception as e:
+                logger.warning(f"[MemoryAPI] 服务停止异常: {_safe_error_msg(e)}")
+            self._runner = None
 
 
 class DatabaseManager:
@@ -1420,6 +1553,8 @@ class Main(Star):
         os.makedirs(self.data_dir, exist_ok=True)
 
         self.memory_manager = MemoryManager(self.data_dir, self.config.get("max_memories_per_user", 100))
+        # 记忆外部 API 服务（v5.10.0）：enable 后在 initialize 中启动
+        self._memory_api_server: Optional[MemoryApiServer] = None
         self.email_sender = EmailSender(self.config)
         self.db_manager = DatabaseManager(self.data_dir)
         self.session = QzoneSession()
@@ -3177,7 +3312,11 @@ class Main(Star):
                 "记一下", "记下来", "帮我记", "给我记", "备注一下", "存一下", "写下来", "留个底", "别忘了", "提醒我",
                 "记个事", "记事本", "记忆本", "记忆库", "add note", "remember this", "memorize", "store info",
                 "keep in mind", "note down", "jot down", "record info", "存档信息", "保存资料", "记住这个", "别忘掉",
-                "脑子记一下", "记一笔", "留个记录", "俺记一下", "侬记牢", "记到", "记住哈", "记好", "mark memory", "set reminder"
+                "脑子记一下", "记一笔", "留个记录", "俺记一下", "侬记牢", "记到", "记住哈", "记好", "mark memory", "set reminder",
+                "请记住", "帮我记住", "记住这件事", "记一下这个", "把这个记下来"
+                "存到记忆里", "加入记忆库", "写入记忆", "记住我说的话", "帮我存着"
+                "这个很重要记下来", "记在小本本上", "记牢一点", "帮我牢记", "存进记忆"
+                "添加一条记忆", "新增记忆", "记个笔记", "保存这条信息", "记住我的喜好"
             ],
             "handler": self.add_memory
         }
@@ -3201,7 +3340,11 @@ class Main(Star):
                 "想想以前", "以前记的", "历史记录", "过往记录", "搜索笔记", "查找笔记", "找找看", "检索记忆", "找回忆",
                 "回忆录", "个人档案", "资料查询", "信息检索", "查存档", "看存档", "读记忆", "读取记忆", "翻阅记忆",
                 "查看记录", "看记录", "搜记录", "检索记录", "查备忘", "看备忘", "搜索备忘", "search note", "query memory",
-                "lookup memory", "find memory", "recall memory"
+                "lookup memory", "find memory", "recall memory",
+                "我以前说过什么", "查一下记忆", "翻翻记忆", "你还记得什么", "记得哪些事"
+                "找找之前的记录", "以前的偏好", "我提过什么要求", "检索记忆库", "记忆里有什么"
+                "翻一下记录", "之前记的内容", "历史记忆", "我记过哪些东西", "搜搜记忆"
+                "找记忆内容", "看看记了啥", "翻出那条记忆", "查查过去的记录", "回忆一下之前"
             ],
             "handler": self.search_memories
         }
@@ -3225,7 +3368,12 @@ class Main(Star):
                 "改一下记忆", "更新一下", "编辑一下", "修改存档", "更新存档", "刷新存档", "修正信息", "更正信息",
                 "改内容", "更新内容", "修改内容", "编辑内容", "调整内容", "变更记忆", "改变记忆", "变动记忆",
                 "修改个人信息", "更新资料", "编辑资料", "change memory", "modify note", "revise memory",
-                "alter memory", "update note", "refresh memory", "correct memory", "amend memory"
+                "alter memory", "update note", "refresh memory", "correct memory", "amend memory",
+                "改一下那条记忆", "记忆要更新", "那条记错了", "改记忆内容", "换条新说法"
+                "更新那条记录", "纠正记忆", "把记忆改了", "修改那条笔记", "记忆内容变了"
+                "重新记一下", "改一下标签", "重要度调高", "调整记忆等级", "改记录"
+                "替换记忆内容", "编辑那条记忆", "修改记忆标签", "信息有变更新记忆",
+                "记忆改一改"
             ],
             "handler": self.update_memory
         }
@@ -3246,7 +3394,12 @@ class Main(Star):
                 "删了它", "不要了", "作废", "删除记录", "移除记录", "清除记录", "删档", "删掉存档", "删除备忘",
                 "移除备忘", "清除备忘", "删除存档", "移除存档", "清除存档", "forget", "erase memory", "wipe memory",
                 "discard memory", "drop memory", "purge memory", "clear memory", "delete note", "remove memory",
-                "clean memory", "删掉记忆", "抹掉记忆", "取消记忆", "撤销记忆"
+                "clean memory", "删掉记忆", "抹掉记忆", "取消记忆", "撤销记忆",
+                "忘掉这件事", "把那条记忆删了", "不要记这个了", "清除那条记录", "删掉那条记忆"
+                "这条作废", "忘了吧", "别记着了", "把记录清掉", "删除那条笔记"
+                "清除记忆库", "那条信息删掉", "不用记了", "移除那条记忆", "把这条删了"
+                "清空我的记忆", "这条不对删掉", "废弃那条记录", "取消那条记忆",
+                "把那条忘掉"
             ],
             "handler": self.delete_memory
         }
@@ -3266,7 +3419,11 @@ class Main(Star):
                 "记忆明细", "记忆信息", "显示记忆", "展示记忆", "查看某条记忆", "看那条记忆", "那条记忆是什么",
                 "记忆详情页", "记忆详细内容", "具体内容", "查看具体", "详细内容", "完整记忆", "记忆全文",
                 "查看完整记录", "显示完整信息", "get memory detail", "view memory", "show memory", "inspect memory",
-                "memory info", "memory details", "look at memory", "examine memory", "check memory"
+                "memory info", "memory details", "look at memory", "examine memory", "check memory",
+                "那条记忆具体是什么", "看看记忆全文", "记忆的详细内容", "展开那条记忆", "记忆里写了什么"
+                "看看那条记录内容", "记忆详情给我", "完整看看那条", "这条记忆具体内容", "查看记忆原文"
+                "记忆详细信息", "看下那条记的啥", "展示记忆内容", "记忆里细节", "查那一条记忆"
+                "记忆内容是什么", "打开那条记忆", "看看记的具体信息", "读取那条记忆", "细看记忆内容"
             ],
             "handler": self.get_memory_detail
         }
@@ -3289,7 +3446,11 @@ class Main(Star):
                 "发一条", "发个消息", "发信息给", "给某人发消息", "传话", "转告", "告知", "通报", "传达", "发文字",
                 "发短信", "发送文本", "群内发", "群里说", "在群里发", "私信", "小窗", "私聊一下", "单独发", "send text",
                 "text someone", "message someone", "notify", "alert", "ping", "发个信息", "捎个话", "带个话",
-                "讲一声", "说一声", "通知一下", "告诉一下", "告知一下", "转达一下", "传达一下", "发过去"
+                "讲一声", "说一声", "通知一下", "告诉一下", "告知一下", "转达一下", "传达一下", "发过去",
+                "给某人捎句话", "帮我告诉", "发个私信", "跟他说", "跟她说"
+                "给群里发个消息", "发消息给好友", "替我传话", "给他发条信息", "发到群里"
+                "私聊发一下", "帮我发短信", "发条消息", "群发一条", "给那个人发"
+                "通知某人", "喊一下某人", "发文字给他", "给好友留言", "发送给某人"
             ],
             "handler": self.send_message_tool
         }
@@ -3312,7 +3473,12 @@ class Main(Star):
                 "定时发", "定时提醒", "到时发", "预约发送", "延迟发送", "预定消息", "设置定时", "定时任务", "闹钟消息",
                 "定时传话", "定时通知", "定时告知", "定时转告", "定时提醒我", "定时告诉他", "定时告诉她", "定时广播",
                 "定时群发", "定时私聊", "delay message", "send later", "schedule msg", "scheduled text",
-                "future message", "plan message", "time message", "set reminder", "alarm message"
+                "future message", "plan message", "time message", "set reminder", "alarm message",
+                "晚上八点提醒我", "明天早上发消息", "过会儿发给他", "到点自动发", "设置一个定时"
+                "帮我定时发", "预约一条消息", "几分钟后发送", "中午十二点发", "晚上提醒他说"
+                "明早自动发消息", "设个提醒", "安排稍后发送", "定个时间发", "延时发送消息"
+                "晚点发给他", "到时间提醒", "定时给他留言", "半夜自动发",
+                "定时发一条"
             ],
             "handler": self.schedule_message
         }
@@ -3331,7 +3497,11 @@ class Main(Star):
                 "取消定时", "撤销定时", "取消任务", "cancel schedule", "删除定时", "取消预约", "取消预定", "取消闹钟",
                 "停止定时", "终止定时", "取消定时消息", "撤销定时消息", "取消延迟", "撤销延迟", "取消计划", "取消安排",
                 "cancel reminder", "stop schedule", "remove schedule", "unschedule", "drop task", "abort task",
-                "取消那个任务", "不要定时了", "算了别发了", "取消发送", "撤销发送"
+                "取消那个任务", "不要定时了", "算了别发了", "取消发送", "撤销发送",
+                "刚才的定时取消", "别定时了", "那条预约撤了", "定时的不发了", "取消刚才设置的"
+                "撤销那个提醒", "取消刚才的定时任务", "把定时撤了", "不要定时发送了", "那个消息不用发了"
+                "取消稍后发送", "定时取消掉", "撤掉预约消息", "取消那个闹钟", "把刚才的任务取消"
+                "停止那个定时", "不用自动发了", "取消延迟发送", "那个定时作废", "删除刚才的定时"
             ],
             "handler": self.cancel_scheduled_message
         }
@@ -3350,7 +3520,11 @@ class Main(Star):
                 "定时列表", "查看定时", "任务列表", "pending tasks", "scheduled list", "有哪些定时", "定时任务列表",
                 "查看预约", "查看计划", "定时清单", "待发送列表", "排队消息", "列出定时", "显示定时", "展示定时",
                 "list schedules", "show scheduled", "view schedules", "get tasks", "check tasks", "all timers",
-                "当前定时", "进行中的定时"
+                "当前定时", "进行中的定时",
+                "我设了哪些定时", "看看定时任务", "有哪些预约消息", "查一下定时的", "定时了什么"
+                "列出所有定时", "排队的消息有哪些", "还没发的定时", "查看我的定时", "定时消息有哪些"
+                "看看排了什么", "现在有几个定时", "待发送的消息", "预约了哪些", "查看定时安排"
+                "列出定时消息", "显示定时任务", "我的定时清单", "看看设置过什么定时", "计划发送的列表"
             ],
             "handler": self.list_scheduled_messages
         }
@@ -3375,7 +3549,12 @@ class Main(Star):
                 "发说说", "空间动态", "QQ空间", "发空间", "publish post", "qzone", "说说", "发一条说说", "写说说",
                 "分享到空间", "空间发文", "空间说说", "发表动态", "空间状态", "空间日志", "写日志", "post to qzone",
                 "update qzone", "share to qzone", "qzone feed", "说说内容", "发个说说", "更新空间", "发动态",
-                "带图发说说", "说说配图", "发图说说", "空间配图", "发带图动态", "图片说说", "说说加图片", "发照片到空间"
+                "带图发说说", "说说配图", "发图说说", "空间配图", "发带图动态", "图片说说", "说说加图片", "发照片到空间",
+                "帮我发个说说", "发到QQ空间", "发条动态", "空间里发一下", "更新一下空间"
+                "带图发个说说", "发说说配图", "把这张图发空间", "写一条说说", "发表到空间"
+                "空间发个状态", "帮我发动态", "发个带图的说说", "在空间发条消息", "把照片发到空间"
+                "空间更新动态", "发说说吧", "帮我写条说说发出去", "转发到空间",
+                "发个空间动态"
             ],
             "handler": self.publish_qzone
         }
@@ -3395,7 +3574,11 @@ class Main(Star):
             "keywords": [
                 "戳一戳", "窗口抖动", "poke", "戳", "抖动", "提醒", "戳一下", "戳他", "戳她", "戳戳", "戳人", "抖窗",
                 "振屏", "拍一拍", "碰一碰", "轻触", "点一下", "戳一下用户", "抖动窗口", "send poke", "nudge", "tap",
-                "shake", "buzz", "ping someone"
+                "shake", "buzz", "ping someone",
+                "戳他一下", "抖一下窗口", "拍他一下", "提醒他一下", "戳戳那个人"
+                "给他戳个", "窗口震一下", "抖他屏幕", "拍一拍他", "碰他一下"
+                "戳我一下", "叫他一下", "轻轻戳一下", "poke他", "震屏提醒"
+                "戳这个人", "给他个戳一戳", "屏幕抖动", "戳一下好友", "提醒对方"
             ],
             "handler": self.send_poke
         }
@@ -3418,7 +3601,12 @@ class Main(Star):
                 "status", "online", "away", "busy", "invisible", "状态切换", "改状态", "换状态", "设置在线", "设为隐身",
                 "设为忙碌", "设为离开", "设为Q我吧", "设为请勿打扰", "设为听歌中", "设为睡觉中", "设为学习中", "调整状态",
                 "变更状态", "修改状态", "更新状态", "change status", "set status", "update status", "status update",
-                "appear offline", "go invisible", "go busy", "go away", "set online", "状态设置"
+                "appear offline", "go invisible", "go busy", "go away", "set online", "状态设置",
+                "改成忙碌", "设成隐身", "我现在要离开", "别打扰我", "切换到Q我吧"
+                "显示听歌中", "显示学习中", "显示睡觉中", "状态改一下", "挂个忙碌状态"
+                "隐身一会儿", "状态持续一小时", "在线改成离开", "我要睡了改状态", "改下我的状态"
+                "换一个状态", "忙碌两小时", "暂时隐身", "状态设置为离开",
+                "切到忙碌状态"
             ],
             "handler": self.update_qq_status
         }
@@ -3430,7 +3618,11 @@ class Main(Star):
             "keywords": [
                 "当前状态", "状态查询", "在线状态查询", "get status", "查看状态", "我现在什么状态", "什么状态",
                 "查询状态", "看看状态", "我的状态", "机器人状态", "bot状态", "check status", "show status",
-                "status info", "current status", "what is my status"
+                "status info", "current status", "what is my status",
+                "现在是什么状态", "看看我状态", "状态还剩多久", "机器人现在在线吗", "当前在线情况"
+                "现在的状态是啥", "查下状态", "状态多久恢复", "我现在显示什么", "在线状态是什么"
+                "看下机器人状态", "状态查询一下", "现在挂的什么状态", "状态什么时候到期", "目前状态"
+                "机器人状态如何", "什么在线状态", "看下状态信息", "现在隐身了吗", "状态详情"
             ],
             "handler": self.get_qq_status
         }
@@ -3441,7 +3633,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "娱乐状态", "fun status", "状态列表", "可用状态", "有哪些娱乐状态", "娱乐状态列表", "趣味状态",
-                "特殊状态", "所有状态", "状态选项", "可选状态", "list status", "get status list", "show statuses"
+                "特殊状态", "所有状态", "状态选项", "可选状态", "list status", "get status list", "show statuses",
+                "有哪些有趣的状态", "可以设什么状态", "状态都能选啥", "娱乐状态有哪些", "看看可选状态"
+                "状态有什么种类", "有什么特殊状态", "能设置的状态列表", "趣味状态有哪些", "都支持什么状态"
+                "状态选项有哪些", "看看有什么状态", "特殊状态列表", "有什么好玩的状态", "全部状态列表"
+                "可切换的状态", "状态种类", "支持哪些状态", "看看状态清单", "可选的在线状态"
             ],
             "handler": self.get_fun_status_list
         }
@@ -3464,7 +3660,11 @@ class Main(Star):
                 "高级定时", "持久定时", "定时指令", "计划任务", "cron", "scheduled command", "自动化", "定时发空间",
                 "定时改状态", "定时提醒", "每天定时", "重复任务", "周期任务", "例行任务", "预约指令", "延迟执行",
                 "计划指令", "预置任务", "设置自动化", "自动化任务", "定时执行", "计划执行", "create cron", "schedule job",
-                "set cron", "add cron", "new schedule", "定时任务持久化", "重启后保留", "永久定时"
+                "set cron", "add cron", "new schedule", "定时任务持久化", "重启后保留", "永久定时",
+                "每天早上发说说", "每天定时提醒我", "设置每日任务", "定时发空间说说", "每天晚上改状态"
+                "周期性提醒", "每天几点做什么", "长期定时任务", "自动每天执行", "设定每日计划"
+                "每天自动发动态", "定时执行指令", "设置重复任务", "永久定时任务", "自动化定时"
+                "每天固定时间", "循环任务", "每天提醒一次", "定时跑指令", "重启也不丢的定时"
             ],
             "handler": self.create_scheduled_command
         }
@@ -3482,7 +3682,11 @@ class Main(Star):
             "keywords": [
                 "定时指令列表", "查看计划", "cron list", "scheduled commands list", "列出高级定时", "高级定时列表",
                 "查看自动化任务", "自动化列表", "计划列表", "查看 cron", "show crons", "list jobs", "get schedules",
-                "有哪些定时任务"
+                "有哪些定时任务",
+                "看看高级定时", "计划任务有哪些", "查一下自动化任务", "定时指令有哪些", "列出计划任务"
+                "我的定时指令", "查看每日任务", "设置的自动化", "有哪些周期任务", "看看定时安排表"
+                "所有定时指令", "查查计划任务", "每日任务列表", "持久化的定时", "看看设过的指令"
+                "自动化任务列表", "定时执行计划", "列出所有计划", "查看周期性任务", "当前计划任务"
             ],
             "handler": self.list_scheduled_commands
         }
@@ -3500,7 +3704,11 @@ class Main(Star):
             "keywords": [
                 "取消计划", "取消定时指令", "cancel cron", "delete scheduled command", "停止高级定时",
                 "终止定时任务", "取消自动化", "取消预约", "取消周期", "取消重复", "取消计划任务", "abort cron",
-                "stop schedule", "remove cron"
+                "stop schedule", "remove cron",
+                "取消那个每日任务", "高级定时不要了", "停掉那个计划任务", "取消每天提醒", "取消周期任务"
+                "把那个自动任务停了", "撤销定时指令", "那个自动化取消", "取消每日发说说", "停止重复任务"
+                "取消那个循环", "把每日任务撤了", "取消计划中的任务", "终止那个定时", "停用那个指令"
+                "取消长期定时", "别每天发了", "取消定时执行", "撤销那个自动化", "停掉每日计划"
             ],
             "handler": self.cancel_scheduled_command
         }
@@ -3517,7 +3725,12 @@ class Main(Star):
             },
             "keywords": [
                 "删除计划", "移除定时指令", "永久删除", "delete cron", "清除任务", "删除高级定时", "删除自动化",
-                "抹掉任务", "清除 cron", "移除 cron", "remove job", "delete job"
+                "抹掉任务", "清除 cron", "移除 cron", "remove job", "delete job",
+                "把那个定时指令删掉", "彻底删除计划任务", "清除那个定时", "删掉自动化任务", "删除每日任务"
+                "把任务记录清掉", "彻底删掉那个计划", "清除自动化", "删除那条定时", "把计划任务删除"
+                "删了那个循环任务", "清除定时记录", "删除已取消的任务", "把过期的任务删了", "清理定时任务"
+                "删除那个每日提醒", "移除自动化任务", "删掉定时指令记录", "彻底清理任务",
+                "删掉那条计划"
             ],
             "handler": self.delete_scheduled_command
         }
@@ -3536,7 +3749,11 @@ class Main(Star):
             "keywords": [
                 "撤回", "撤回消息", "recall", "delete message", "撤销", "删消息", "撤回那条", "撤销消息", "收回",
                 "取消发送", "撤回我的", "撤了", "撤掉", "撤除", "撤回刚发的", "撤回上一句", "撤回群消息", "recall msg",
-                "unsend", "revoke", "retract", "withdraw", "remove message"
+                "unsend", "revoke", "retract", "withdraw", "remove message",
+                "把那条消息撤回", "收回刚才那句", "刚发错了撤回", "撤回上一条", "帮我撤回"
+                "那条撤了", "把我说的话撤掉", "撤回刚才的消息", "那条不用了撤回", "撤销那条消息"
+                "刚才的话收回", "删掉刚发的那条", "消息撤一下", "把最后一条撤回", "那条话撤掉"
+                "撤回发错的消息", "刚那条作废", "收回消息", "撤回给我", "删除那条消息"
             ],
             "handler": self.recall_by_reply
         }
@@ -3558,7 +3775,11 @@ class Main(Star):
             "keywords": [
                 "邮件", "发送邮件", "email", "QQ邮箱", "邮箱", "mail", "发信", "发邮件", "寄信", "写信", "send email",
                 "e-mail", "电子邮件", "电邮", "发伊妹儿", "邮寄", "发封信", "发个邮件", "发一封邮件", "send mail",
-                "mail to", "email to", "compose email", "send an email"
+                "mail to", "email to", "compose email", "send an email",
+                "给某人发封邮件", "帮我发邮件", "写封邮件发出去", "发一封电子邮件", "用QQ邮箱发信"
+                "给他发邮件", "邮件发到这个地址", "帮我寄封邮件", "发邮件通知", "写邮件给"
+                "发个邮箱消息", "发正式邮件", "邮箱发一下", "帮我写邮件", "邮件提醒对方"
+                "发邮件说明情况", "给邮箱发消息", "发一封正式的信", "邮箱传消息", "发封邮件"
             ],
             "handler": self.send_qq_email_tool
         }
@@ -3578,7 +3799,11 @@ class Main(Star):
             "keywords": [
                 "群身份", "管理员", "群主", "成员", "权限", "role", "group role", "查身份", "是什么身份", "什么角色",
                 "群内身份", "群内职位", "查看权限", "检查身份", "查询角色", "用户角色", "get role", "check role",
-                "user role", "member role", "群地位"
+                "user role", "member role", "群地位",
+                "他是管理吗", "谁是群主", "查一下他的身份", "他在群里的职位", "那个人是什么身份"
+                "他是管理员还是成员", "看看群主是谁", "查查权限", "他有没有管理权限", "这个人在群里干嘛的"
+                "群里的身份查询", "他是普通成员吗", "查他群职位", "看下某人身份", "群里什么地位"
+                "管理员身份查询", "成员身份看看", "他管理着群吗", "查某人的群角色", "群内职位查询"
             ],
             "handler": self.get_user_group_role
         }
@@ -3590,7 +3815,12 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "精华消息", "加精", "设为精华", "essence", "pin message", "设置精华", "标记精华", "精华", "加精华",
-                "设为群精华", "添加精华", "推为精华", "加精消息", "pin msg", "set essence", "make essence"
+                "设为群精华", "添加精华", "推为精华", "加精消息", "pin msg", "set essence", "make essence",
+                "这条消息加精华", "把这条设为精华", "精华一下", "这条很有用设精华", "收藏到精华"
+                "放进群精华", "这条设精", "把刚才那条加精", "加到精华消息", "消息加精"
+                "把这条钉到精华", "精华这条发言", "加入精华列表", "这个值得加精", "保留为精华"
+                "设成精华消息", "精华设置", "把那条设精华", "选为精华",
+                "把这条收进精华"
             ],
             "handler": self.set_essence_msg
         }
@@ -3601,7 +3831,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "取消精华", "移除精华", "unpin", "delete essence", "取消加精", "去掉精华", "删除精华", "撤销精华",
-                "移出精华", "unset essence", "remove essence", "unpin message", "取消精华消息"
+                "移出精华", "unset essence", "remove essence", "unpin message", "取消精华消息",
+                "把那条精华撤了", "取消这条精华", "从精华里移除", "这条别精了", "撤掉精华"
+                "精华取消掉", "那条不用精华了", "移出群精华", "把精华撤下来", "取消那条加精"
+                "删除精华消息", "精华里去掉", "撤销精华设置", "那条移除精华", "不要精华了"
+                "精华取消一下", "把这条从精华删除", "撤销加精", "精华下架", "去掉精华标记"
             ],
             "handler": self.delete_essence_msg
         }
@@ -3620,7 +3854,11 @@ class Main(Star):
             "keywords": [
                 "禁言", "解禁", "ban", "mute", "禁言用户", "解除禁言", "unmute", "禁止发言", "不许说话", "闭嘴",
                 "关小黑屋", "封口", "禁言某人", "让他闭嘴", "把她禁言", "禁言多少分钟", "解封", "恢复发言",
-                "允许说话", "取消禁言", "ban user", "mute member", "unmute user", "shut up", "silence"
+                "允许说话", "取消禁言", "ban user", "mute member", "unmute user", "shut up", "silence",
+                "让他禁言十分钟", "禁他一小时", "把那个人禁言", "禁言五分钟", "让他闭嘴一会儿"
+                "先禁言再说", "给他禁言", "禁那个人话", "把某人哑了", "禁止他发言"
+                "禁言到明天", "把他关小黑屋", "先禁言处理", "让他安静会儿", "解禁某人"
+                "放他出来", "解除他的禁言", "让他可以说话", "取消那个禁言", "把他放出来说话"
             ],
             "handler": self.set_group_ban
         }
@@ -3638,7 +3876,12 @@ class Main(Star):
             "keywords": [
                 "踢人", "移除成员", "kick", "踢出群", "请出群", "踢掉", "移除", "逐出", "赶出去", "踢了",
                 "把他踢了", "把她踢了", "移除群聊", "移出群", "删除成员", "kick user", "remove member", "boot",
-                "expel", "banish"
+                "expel", "banish",
+                "把那个人踢出去", "踢掉这个人", "让他退群", "把某某请出群", "移出这个人"
+                "把捣乱的踢了", "踢出群聊", "这个人不要了踢掉", "把他移出群聊", "请他出去"
+                "踢了这个号", "驱逐出群", "把那人移除", "该踢的踢了", "把他赶出去"
+                "移除那个成员", "这人踢掉", "踢人操作", "让他离开本群",
+                "把这个人踢出群"
             ],
             "handler": self.set_group_kick
         }
@@ -3655,7 +3898,11 @@ class Main(Star):
             },
             "keywords": [
                 "全体禁言", "全员禁言", "全群禁言", "mute all", "whole ban", "全部禁言", "所有人禁言", "开启全员禁言",
-                "关闭全员禁言", "全群静音", "全体静音", "mute everyone", "ban all", "全群闭嘴"
+                "关闭全员禁言", "全群静音", "全体静音", "mute everyone", "ban all", "全群闭嘴",
+                "全员禁言一下", "所有人都不许说话", "全群安静", "开全体禁言", "大家先别说话"
+                "全群禁言模式", "关闭全体禁言", "解除全员禁言", "让大家说话", "全群解禁"
+                "所有人禁言一小时", "禁全群的话", "开启全员静音", "全群闭嘴模式", "全体禁言开启"
+                "取消全群禁言", "全员闭麦", "全群静音处理", "整个群禁言", "群禁言开关"
             ],
             "handler": self.set_group_whole_ban
         }
@@ -3674,7 +3921,11 @@ class Main(Star):
             "keywords": [
                 "群昵称", "群名片", "改名片", "set card", "改名", "nickname", "修改群昵称", "改群名", "设置群名片",
                 "修改名片", "改他的名片", "改她的名片", "群内昵称", "群别名", "group nickname", "set nickname",
-                "change card", "update card", "rename member"
+                "change card", "update card", "rename member",
+                "把他的群昵称改成", "帮他改个名片", "给某人改群名片", "改下他的群称", "设置群内昵称"
+                "把群名片改了", "给他起个群昵称", "修改某人名片", "改群里的名字", "群名片设成"
+                "取消他的群名片", "名片清空", "给新人改名片", "统一群名片", "改他卡片名"
+                "群昵称调整", "换张名片", "他的名片不对", "群称修改", "给他改个称呼"
             ],
             "handler": self.set_group_card
         }
@@ -3692,7 +3943,11 @@ class Main(Star):
             "keywords": [
                 "群公告", "发布公告", "notice", "announcement", "通知", "发公告", "群通知", "发群公告", "写公告",
                 "贴公告", "公布", "广而告之", "群内通知", "发布群通知", "send notice", "post announcement",
-                "group notice", "make announcement"
+                "group notice", "make announcement",
+                "发个群公告", "群里通知一下", "公告写一下", "把通知发到公告", "发个全员公告"
+                "群公告更新", "写个通知贴公告", "发布新公告", "公告栏发一下", "通知全体成员"
+                "群内广而告之", "发个重要通知", "公告发出去", "更新群通知", "写公告通知大家"
+                "把规则发公告", "公告提醒", "群公告发布", "发条群消息公告", "通知公告一下"
             ],
             "handler": self.send_group_notice
         }
@@ -3709,7 +3964,13 @@ class Main(Star):
             },
             "keywords": [
                 "删除公告", "撤回公告", "delete notice", "取消公告", "移除公告", "撤公告", "删公告", "删除群公告",
-                "撤销群公告", "remove notice", "recall notice"
+                "撤销群公告", "remove notice", "recall notice",
+                "把那个公告撤了", "公告不需要了", "删掉那条公告", "公告下架", "把旧公告删了"
+                "那条通知删掉", "公告清理", "撤掉旧通知", "公告过期删了", "删除群通知"
+                "去掉那个公告", "公告撤回", "清掉公告栏", "那条公告作废", "删公告操作"
+                "公告移除", "把通知撤下来", "旧公告清理",
+                "那条公告撤下来"
+                "公告删一删"
             ],
             "handler": self.delete_group_notice
         }
@@ -3720,7 +3981,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "群文件", "文件列表", "list files", "查看文件", "群共享文件", "群资料", "群文档", "有哪些文件",
-                "看看群文件", "列出群文件", "group files", "list group files", "show files", "dir"
+                "看看群文件", "列出群文件", "group files", "list group files", "show files", "dir",
+                "群文件有什么", "看看群里的文件", "群共享里都有啥", "群文件都有哪些", "群资料看下"
+                "群里存了什么文件", "列出共享文件", "群盘里有什么", "看下群文档", "群文件清单"
+                "群里有啥资料", "共享文件夹内容", "群文件浏览", "群存储内容", "看看共享区"
+                "群文件目录", "文件都有啥", "群文件区看看", "群资源列表", "群文件情况"
             ],
             "handler": self.list_group_files
         }
@@ -3737,7 +4002,11 @@ class Main(Star):
             },
             "keywords": [
                 "删除群文件", "删文件", "delete file", "移除文件", "删除群共享", "删掉群文件", "清除群文件",
-                "remove file", "delete group file", "erase file"
+                "remove file", "delete group file", "erase file",
+                "把那个群文件删了", "群里的文件删掉", "删掉共享文件", "把过期文件删了", "群文件清除"
+                "那个文件不要了", "移除群里的文件", "删掉那个附件", "群文件删除操作", "清理群文件"
+                "删除共享文档", "把那个删了群文件", "移除共享区文件", "清掉那个文件", "群文件去掉"
+                "删除群里资料", "那个群文件作废", "文件从群里删除", "清除共享文件", "删除群内文件"
             ],
             "handler": self.delete_group_file
         }
@@ -3748,7 +4017,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "群成员", "成员列表", "member list", "群友", "查看成员", "群成员信息", "群内成员", "群成员名单",
-                "列出成员", "list members", "group members", "show members", "who is in group"
+                "列出成员", "list members", "group members", "show members", "who is in group",
+                "群里有多少人", "看看群成员都有谁", "成员名单", "群友列表", "都谁是群里的"
+                "群成员情况", "查一下群人数", "群里的成员看看", "列出所有人", "群成员都有哪些人"
+                "看下群友", "成员信息查一下", "群内人员", "群人数查询", "这个群都有谁"
+                "群成员统计", "看看群里的伙伴", "群人员列表", "成员都有谁", "群成员查询"
             ],
             "handler": self.get_group_members_info
         }
@@ -3768,7 +4041,11 @@ class Main(Star):
             "keywords": [
                 "设置管理员", "取消管理员", "admin", "群管", "任命", "给管理", "提升为管理", "设为管理", "撤管理",
                 "下管理", "取消管理", "set admin", "promote to admin", "demote from admin", "make admin",
-                "remove admin", "群管理员"
+                "remove admin", "群管理员",
+                "给他个管理员", "让某人当管理", "提拔他为管理", "给他管理权限", "任命管理员"
+                "把管理给某人", "撤掉他的管理", "取消他管理员", "管理撤了", "不再让他管理"
+                "收回管理权限", "让他管群", "设某人为管理", "他当管理员吧", "给这个人管理"
+                "撤他的管理职位", "管理资格给他", "取消管理资格", "管理员设置", "群管理任命"
             ],
             "handler": self.set_group_admin
         }
@@ -3785,7 +4062,11 @@ class Main(Star):
             },
             "keywords": [
                 "群名称", "改名", "修改群名", "rename group", "群名", "改群名", "重命名群", "变更群名称",
-                "set group name", "change group name", "update group name"
+                "set group name", "change group name", "update group name",
+                "群名改成", "给群改个名", "换个群名", "群名字改成", "把群名换一下"
+                "改下群名称", "群名称更换", "这个群改名叫", "群改名操作", "重命名这个群"
+                "群标题改成", "给群起个新名", "群名修改一下", "变更群名", "群叫什么改成"
+                "群名换新", "改群称呼", "群名称重设", "换群名称", "群名字更新"
             ],
             "handler": self.set_group_name
         }
@@ -3796,7 +4077,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "公告列表", "查看公告", "list notices", "群公告列表", "所有公告", "列出公告", "show notices",
-                "get notices", "list group notices"
+                "get notices", "list group notices",
+                "群公告都有啥", "看看现在的公告", "公告内容看下", "群里发的什么公告", "公告栏里有什么"
+                "列出现有公告", "查看群通知", "公告有几条", "看看公告说了啥", "群公告内容"
+                "当前的公告", "公告都写了什么", "群通知列表", "公告信息查看", "看下公告栏"
+                "公告显示", "群公告查询", "有哪些公告", "公告一览", "公告列表看看"
             ],
             "handler": self.get_group_notice_list
         }
@@ -3814,7 +4099,11 @@ class Main(Star):
             },
             "keywords": [
                 "上传文件", "群文件上传", "upload file", "传文件", "上传到群", "群共享上传", "发送文件到群",
-                "upload to group", "share file"
+                "upload to group", "share file",
+                "把这个文件传群里", "传文件到群共享", "上传到群文件", "把资料传上去", "群共享传个文件"
+                "文件传到群里", "帮我把文件传群", "上传这个文档", "把压缩包传群里", "群文件上传一下"
+                "传个东西到群", "共享区上传", "把图片传群文件", "上传资料到群", "文件上到群"
+                "往群里传文件", "上传附件到群", "群文件区上传", "把表格传上去", "文件上传群共享"
             ],
             "handler": self.upload_group_file
         }
@@ -3831,7 +4120,11 @@ class Main(Star):
             },
             "keywords": [
                 "新建文件夹", "创建目录", "create folder", "新建目录", "创建群文件夹", "群文件新建文件夹",
-                "make directory", "new folder"
+                "make directory", "new folder",
+                "群文件建个文件夹", "新建个分类文件夹", "群里建个目录", "建个资料文件夹", "创建个新文件夹"
+                "群盘新建目录", "加个文件夹", "开个新文件夹", "建个相册文件夹", "文件夹建一下"
+                "分类文件夹创建", "建个共享目录", "群文件加目录", "新建资料夹", "创建存储文件夹"
+                "建个文件夹放文件", "新目录创建", "文件夹加一个", "建个文档夹", "目录新建"
             ],
             "handler": self.create_group_file_folder
         }
@@ -3848,7 +4141,11 @@ class Main(Star):
             },
             "keywords": [
                 "删除文件夹", "删目录", "delete folder", "移除文件夹", "删除群文件夹", "remove folder",
-                "delete directory"
+                "delete directory",
+                "把那个文件夹删了", "文件夹不要了", "删掉那个目录", "移除那个文件夹", "清空并删除文件夹"
+                "文件夹删除操作", "把目录删掉", "删掉共享文件夹", "那个分类删了", "文件夹清除"
+                "目录移除", "删掉资料夹", "把空文件夹删了", "文件夹作废", "去掉那个目录"
+                "删除群目录", "文件夹清理删除", "那个夹子删了", "目录清理", "移除共享目录"
             ],
             "handler": self.delete_group_folder
         }
@@ -3865,7 +4162,11 @@ class Main(Star):
             },
             "keywords": [
                 "龙王", "荣誉", "群聊之火", "快乐源泉", "honor", "群荣誉", "查看荣誉", "群内荣誉", "群称号",
-                "群活跃", "group honor", "查看龙王", "谁最活跃", "群称号列表"
+                "群活跃", "group honor", "查看龙王", "谁最活跃", "群称号列表",
+                "谁是龙王", "群荣誉看看", "活跃度排行", "快乐源泉是谁", "群聊之火是谁"
+                "谁是话痨", "群里的荣誉榜", "看看谁最活跃", "龙王榜单", "荣誉统计"
+                "群活跃排行", "新人王是谁", "传说勋章是谁", "群里荣誉查询", "活跃王是谁"
+                "聊天之火查看", "荣誉信息", "群里谁贡献大", "荣誉头衔查看", "群荣誉榜单"
             ],
             "handler": self.get_group_honor_info
         }
@@ -3876,7 +4177,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "@全体成员", "at全体", "剩余次数", "at all remain", "还能@几次", "@所有人剩余次数",
-                "at全体剩余", "查看@全体次数", "check at all", "at all quota"
+                "at全体剩余", "查看@全体次数", "check at all", "at all quota",
+                "还能@全员几次", "艾特全体还剩几次", "@全体还剩多少", "看看at全体次数", "全体艾特余量"
+                "@所有人还有几次", "at全员剩余", "今日@全体次数", "查询@全体余量", "at全体剩余几次"
+                "@次数查询", "剩余的at次数", "全员at额度", "还能@多少次", "看看@余量"
+                "@全体成员额度", "at余量查询", "剩余at次数", "全体at还剩几次", "@全体还剩几次"
             ],
             "handler": self.get_group_at_all_remain
         }
@@ -3894,7 +4199,11 @@ class Main(Star):
             },
             "keywords": [
                 "专属头衔", "头衔", "特殊头衔", "title", "special title", "给头衔", "设置头衔", "授予头衔",
-                "取消头衔", "群头衔", "成员头衔", "set title", "custom title"
+                "取消头衔", "群头衔", "成员头衔", "set title", "custom title",
+                "给他个专属头衔", "头衔设成", "给某人起个头衔", "授予专属称号", "换个头衔"
+                "头衔改成", "给他弄个称号", "取消他的头衔", "头衔清空", "给他换个花样头衔"
+                "成员专属称号", "设置个人头衔", "头衔发一个", "封个头衔", "称号给他改了"
+                "专属名号设置", "把头衔去掉", "赐个头衔", "头衔变更", "给他定个头衔"
             ],
             "handler": self.set_group_special_title
         }
@@ -3905,7 +4214,12 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "禁言列表", "被禁言", "shut list", "muted members", "谁被禁言了", "禁言人员", "查看禁言",
-                "list muted", "show muted", "禁言中的人"
+                "list muted", "show muted", "禁言中的人",
+                "看看禁言名单", "现在谁禁着言", "被禁的人有哪些", "禁言名单查询", "小黑屋里都有谁"
+                "谁在禁言中", "被禁言的成员", "看看谁闭嘴了", "禁言情况查询", "禁言中的都有谁"
+                "谁被关了", "被禁人员列表", "禁言查询", "现在禁着谁", "禁言状态查看"
+                "谁被哑了", "禁言中名单", "查禁言的人", "看看禁言情况",
+                "看看谁被禁言中"
             ],
             "handler": self.get_group_shut_list
         }
@@ -3916,7 +4230,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "加群请求", "忽略请求", "入群申请", "join request", "被忽略的加群", "忽略的申请", "查看忽略请求",
-                "pending requests", "ignored join requests"
+                "pending requests", "ignored join requests",
+                "有没有被忽略的入群申请", "加群请求看看", "谁申请加群了", "入群申请列表", "被忽略的申请"
+                "漏掉的加群申请", "加群审批情况", "有人要进群吗", "看看入群请求", "申请进群的人"
+                "被搁置的申请", "入群审核记录", "加群申请查询", "没处理的申请", "申请名单看看"
+                "入群请求有哪些", "被忽略的加群人", "待处理申请", "加群请求记录", "审查入群申请"
             ],
             "handler": self.get_group_ignore_add_request
         }
@@ -3933,7 +4251,12 @@ class Main(Star):
             },
             "keywords": [
                 "加群方式", "入群设置", "join option", "验证", "允许加群", "禁止加群", "加群验证", "加群权限",
-                "设置加群", "群加入方式", "set join option", "group join setting"
+                "设置加群", "群加入方式", "set join option", "group join setting",
+                "允许任何人加群", "加群要验证", "不许别人加群", "关闭入群", "开放加群"
+                "设置入群验证", "加群方式改一下", "群加人设置", "改成需要验证", "入群权限设置"
+                "加群开关", "谁能进群设置", "加群申请方式", "进群条件设置", "改加入方式"
+                "群准入设置", "开放所有人进群", "加群限制", "入群审核开关",
+                "不许任何人加群"
             ],
             "handler": self.set_group_add_option
         }
@@ -3944,7 +4267,12 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "打卡", "群打卡", "签到", "sign", "群签到", "每日打卡", "群内打卡", "check in", "group sign",
-                "daily sign"
+                "daily sign",
+                "帮我群打卡", "今天签到一下", "签个到", "群里签个到", "打卡一下"
+                "帮我签到", "群签到操作", "今天还没打卡", "来打个卡", "签到领经验"
+                "打卡走起", "签到的操作", "日常打卡", "群里每日签到", "签到打卡"
+                "帮我打个卡", "今日签到", "群打卡功能", "签到一下群",
+                "打卡签到一下"
             ],
             "handler": self.send_group_sign
         }
@@ -3962,7 +4290,11 @@ class Main(Star):
             },
             "keywords": [
                 "QQ头像", "设置头像", "更换头像", "avatar", "profile picture", "改头像", "换头像", "头像设置",
-                "上传头像", "更新头像", "set avatar", "change avatar", "update avatar", "换一个头像"
+                "上传头像", "更新头像", "set avatar", "change avatar", "update avatar", "换一个头像",
+                "换个头像", "头像换成这张", "把头像改了", "设置成这个头像", "更新头像图片"
+                "换张新头像", "帮我换头像", "头像用这张图", "改下QQ头像", "头像图片设置"
+                "给机器人换头像", "把头像设为", "换用这张图当头像", "头像变更", "用这个做头像"
+                "设置个新头像", "换头像操作", "把头像换了", "修改头像图片", "头像重设"
             ],
             "handler": self.set_qq_avatar
         }
@@ -3982,7 +4314,11 @@ class Main(Star):
             },
             "keywords": [
                 "移动文件", "移动群文件", "move file", "剪切", "文件移动", "移动位置", "挪文件", "转移文件",
-                "移动群共享", "move group file", "relocate file"
+                "移动群共享", "move group file", "relocate file",
+                "把文件移到那个文件夹", "文件挪个位置", "把群文件移动", "文件移到分类里", "挪到那个目录"
+                "文件换个文件夹", "移动到指定目录", "把文件归档", "文件转移位置", "挪文件操作"
+                "文件搬家", "整理文件位置", "把文档移过去", "文件移动到新目录", "移动群共享文件"
+                "把那个文件挪走", "文件位置调整", "转移文件目录", "文件移位", "归类文件"
             ],
             "handler": self.move_group_file
         }
@@ -4001,7 +4337,11 @@ class Main(Star):
             },
             "keywords": [
                 "重命名文件", "改名", "rename file", "文件重命名", "修改文件名", "群文件改名", "更改文件名",
-                "rename group file"
+                "rename group file",
+                "文件重命名一下", "把文件名改了", "那个文件改个名", "重命名群文件", "文件名换成"
+                "改下文件标题", "文件名字改一下", "给文件换个名", "文件改名操作", "文档重命名"
+                "把那个文件改名", "文件名称修改", "文件名更新", "重命名一下资料", "改下那个文件名"
+                "文件换名字", "重命名共享文件", "文件改名", "文件名称变更", "文件改名处理"
             ],
             "handler": self.rename_group_file
         }
@@ -4018,7 +4358,11 @@ class Main(Star):
             },
             "keywords": [
                 "传输文件", "获取文件链接", "trans file", "下载链接", "文件直链", "群文件下载", "获取下载地址",
-                "get file url", "transfer file"
+                "get file url", "transfer file",
+                "给我那个文件的下载链接", "群文件怎么下载", "拿一下文件链接", "把群文件传给我", "文件直链给我"
+                "获取那个文件", "群文件链接发我", "下载那个群文件", "文件地址给我", "取一下文件"
+                "群文件取回来", "把文件链接给我", "文件下载地址", "要那个文件", "群共享文件下载"
+                "文件链接提取", "拿文件下来", "文件传输给我", "取群文件", "获取共享文件"
             ],
             "handler": self.trans_group_file
         }
@@ -4037,7 +4381,12 @@ class Main(Star):
             },
             "keywords": [
                 "点赞", "名片赞", "like", "送赞", "点个赞", "给个赞", "赞一个", "点赞一下", "刷赞", "送爱心",
-                "send like", "give like", "thumb up", "praise"
+                "send like", "give like", "thumb up", "praise",
+                "给他点十个赞", "帮某人点赞", "赞他一下", "给他刷赞", "送他名片赞"
+                "给那个人点赞", "赞一下好友", "给他点满赞", "帮忙点赞", "点赞操作"
+                "送几个赞", "给他点赞鼓励", "点十个赞", "赞爆他", "名片赞来一套"
+                "给他送赞", "点赞这个号", "给好友送赞", "赞他",
+                "给他点赞一下"
             ],
             "handler": self.send_like_tool
         }
@@ -4060,7 +4409,11 @@ class Main(Star):
                 "群聊记录", "群聊历史", "群消息记录", "群内聊天", "群里说了什么", "群聊天",
                 "看看群消息", "查群记录", "群对话", "群消息历史", "群聊内容", "群消息回溯",
                 "群内记录", "群里消息", "群最近消息", "群最新消息", "lookup group messages",
-                "group chat log", "group conversation", "群聊历史记录"
+                "group chat log", "group conversation", "群聊历史记录",
+                "刚才群里聊了什么", "看看群里在聊啥", "最近群里说了什么", "翻一下群聊天记录", "群里刚才发生什么"
+                "群消息看下", "拉取聊天记录", "群里都说了啥", "看看最近的群聊", "群聊回顾"
+                "群里聊什么话题", "查一下群聊内容", "刚才错过了什么", "群里最新消息", "看看大家聊什么"
+                "群消息回放", "把群记录给我", "群里发言记录", "回顾一下群聊", "群聊上下文"
             ],
             "handler": self.get_group_msg_history
         }
@@ -4082,7 +4435,11 @@ class Main(Star):
                 "私聊聊天", "私聊消息", "好友聊天", "看看和某人的聊天", "查私聊记录",
                 "好友对话", "私聊对话", "私人消息记录", "和XXX的聊天", "私聊历史消息",
                 "和好友的聊天", "私人聊天", "私信记录", "私信历史", "private message log",
-                "direct message history"
+                "direct message history",
+                "我和他聊过什么", "看下和某人的聊天记录", "私聊记录翻一下", "他给我发过什么", "上次聊到哪了"
+                "看看私聊内容", "和好友的对话记录", "翻翻我们的聊天", "私聊历史看看", "之前聊了什么"
+                "查一下私信记录", "和他的聊天回顾", "看看聊天到哪", "好友消息记录", "我们聊过的话题"
+                "私聊回看", "把聊天记录给我", "看看之前对话", "聊天上下文查看", "回顾私聊内容"
             ],
             "handler": self.get_friend_msg_history
         }
@@ -4101,7 +4458,11 @@ class Main(Star):
             },
             "keywords": [
                 "群头像", "设置群头像", "group portrait", "group avatar", "改群头像", "换群头像", "群图标",
-                "set group avatar", "change group icon"
+                "set group avatar", "change group icon",
+                "群头像换成这张", "给群换个头像", "把群头像改了", "设置群图标", "群头像用这张"
+                "换个群图", "更新群头像", "群图片改一下", "把群像换了", "设置群封面头像"
+                "群头像重设", "这张图设群头像", "换群的头像", "群头像更新一下", "群标志设置"
+                "改群图标", "群头像换新", "用这个当群头像", "群头像修改", "群形象照设置"
             ],
             "handler": self.set_group_portrait
         }
@@ -4119,7 +4480,11 @@ class Main(Star):
             },
             "keywords": [
                 "自定义表情", "表情列表", "custom face", "emoji", "表情包", "我的表情", "机器人表情", "收藏表情",
-                "get custom faces", "list faces", "fetch faces"
+                "get custom faces", "list faces", "fetch faces",
+                "看看机器人收藏的表情", "表情包列表", "有哪些表情", "机器人的表情", "表情看看"
+                "收藏的表情包", "拉取表情列表", "自定义表情有哪些", "看看表情库存", "表情库"
+                "表情都有啥", "我的表情包", "表情清单", "有哪些自定义表情", "翻翻表情"
+                "表情查看", "收藏表情看看", "表情图列表", "sticker列表", "表情资源"
             ],
             "handler": self.fetch_custom_face
         }
@@ -4138,7 +4503,11 @@ class Main(Star):
             },
             "keywords": [
                 "输入状态", "正在输入", "typing", "输入中", "显示输入", "设置输入中", "让对方看到正在输入",
-                "show typing", "typing indicator"
+                "show typing", "typing indicator",
+                "显示正在输入", "让对方以为在打字", "输入状态装一下", "装作正在打字", "显示打字中"
+                "取消正在输入", "别显示在输入", "对方看到输入中", "打字状态设置", "正在输入效果"
+                "假装在打字", "typing状态", "显示正在打字", "输入状态开启", "输入状态关闭"
+                "让他看到我打字", "输入中显示", "打字中提示", "开启输入提示", "关闭输入提示"
             ],
             "handler": self.set_input_status_tool
         }
@@ -4150,7 +4519,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "AI语音", "语音角色", "AI角色", "characters", "声聊", "音色", "有哪些角色", "AI音色列表",
-                "语音角色列表", "list characters", "get voices", "voice characters", "AI voice"
+                "语音角色列表", "list characters", "get voices", "voice characters", "AI voice",
+                "有哪些声音可以用", "语音音色列表", "看看有什么角色", "能用的嗓音", "声线有哪些"
+                "语音角色都有谁", "看看音色库", "配音角色列表", "有哪些AI声", "音色选择"
+                "声音角色查询", "可用的语音", "角色声音列表", "看看有哪些声优", "语音人物列表"
+                "AI声线", "声音清单", "音色查看", "语音角色选择", "有几种声音"
             ],
             "handler": self.get_ai_characters_tool
         }
@@ -4168,7 +4541,11 @@ class Main(Star):
             },
             "keywords": [
                 "AI语音", "发送语音", "语音消息", "朗读", "voice", "speak", "tts", "语音合成", "文字转语音",
-                "让机器人说话", "机器人语音", "AI朗读", "ai voice", "text to speech", "say"
+                "让机器人说话", "机器人语音", "AI朗读", "ai voice", "text to speech", "say",
+                "用语音说这句话", "发段语音给我", "读一下这段话", "语音念出来", "用某个角色的声音说"
+                "发条语音消息", "把文字转语音发我", "用甜妹声音说", "语音朗读这段", "说给我听"
+                "发一条声音", "念给我听", "语音播报一下", "tts读一下", "发个音频"
+                "让他用语音说", "转换为语音发送", "声音消息发送", "语音说出来", "配音发一下"
             ],
             "handler": self.send_ai_voice_tool
         }
@@ -4187,7 +4564,11 @@ class Main(Star):
             },
             "keywords": [
                 "搜索好友", "搜索群", "查找联系人", "search contact", "找人", "找群", "搜索用户", "查找好友",
-                "查找群", "搜一下", "找一下", "搜索QQ", "search friend", "search group", "lookup"
+                "查找群", "搜一下", "找一下", "搜索QQ", "search friend", "search group", "lookup",
+                "找一下某某的QQ", "帮我查个人", "那个群叫什么找一下", "搜索一下这个人", "查查好友"
+                "找个群", "谁叫这个名字", "帮我找人", "联系人查找", "搜下这个号"
+                "查找某群", "找好友信息", "搜索联系人信息", "群里找人", "找一下那个群"
+                "查这个人", "搜某人", "找群聊", "好友搜索一下", "contact查找"
             ],
             "handler": self.search_contacts
         }
@@ -4205,7 +4586,11 @@ class Main(Star):
             },
             "keywords": [
                 "好友列表", "群列表", "联系人", "contact list", "friends", "groups", "列出好友", "列出群聊",
-                "所有好友", "所有群", "list friends", "list groups"
+                "所有好友", "所有群", "list friends", "list groups",
+                "我有哪些好友", "好友都有谁", "看看我的群", "群都有哪些", "列出所有好友"
+                "我的好友名单", "有哪些群聊", "好友数量", "我加了多少群", "联系人都有谁"
+                "看看通讯录", "好友一览", "群一览", "我的群组", "所有联系人"
+                "好友群列表", "通讯录看看", "我的社交圈", "列出我的群", "好友清单"
             ],
             "handler": self.list_contacts
         }
@@ -4224,7 +4609,11 @@ class Main(Star):
             },
             "keywords": [
                 "个人资料", "修改资料", "改昵称", "改签名", "个性签名", "QQ资料", "profile", "set profile",
-                "更新资料", "编辑资料", "修改个人信息", "change nickname", "update signature"
+                "更新资料", "编辑资料", "修改个人信息", "change nickname", "update signature",
+                "改一下昵称", "签名换成", "把个性签名改了", "昵称改成", "个人说明修改"
+                "改下个人资料", "签名档更新", "换个昵称", "个性签名设置", "资料更新一下"
+                "修改签名", "昵称换新", "个人简介修改", "签名改一下", "资料卡修改"
+                "改机器人昵称", "更新个人签名", "个人资料设置", "昵称签名一起改", "资料信息变更"
             ],
             "handler": self.set_qq_profile_tool
         }
@@ -4244,7 +4633,11 @@ class Main(Star):
             },
             "keywords": [
                 "闪传", "创建闪传", "flash task", "快传", "闪电传输", "create flash", "new flash task",
-                "闪传任务", "发起闪传", "创建快传"
+                "闪传任务", "发起闪传", "创建快传",
+                "把这些文件闪传出去", "创建个快传", "文件快速传输", "闪传这个文件", "帮我把文件闪传"
+                "发起快传任务", "快速分享文件", "闪传多文件", "创建传输任务", "文件快传一下"
+                "生成闪传任务", "大文件传输", "闪传发送准备", "传大文件用闪传", "创建闪传链接"
+                "快传任务创建", "文件秒传", "闪电传文件", "闪传打包发送", "多文件快传"
             ],
             "handler": self.create_flash_task_tool
         }
@@ -4261,7 +4654,11 @@ class Main(Star):
             },
             "keywords": [
                 "闪传文件列表", "flash files", "查看闪传", "闪传里有什么", "get flash files",
-                "闪传文件", "快传文件", "查看快传文件"
+                "闪传文件", "快传文件", "查看快传文件",
+                "闪传任务里有什么文件", "快传的文件看看", "闪传包含哪些", "看下闪传内容", "传输任务文件列表"
+                "闪传了哪些东西", "快传文件清单", "闪传文件查看", "那个任务传了啥", "闪传内容列表"
+                "查看快传内容", "传输的文件列表", "闪传任务详情", "快传里有几个文件", "闪传的资料看看"
+                "任务文件清单", "闪传包内容", "看下传了什么", "闪传文件浏览", "快传文件查看"
             ],
             "handler": self.get_flash_file_list_tool
         }
@@ -4280,7 +4677,11 @@ class Main(Star):
             },
             "keywords": [
                 "闪传下载链接", "flash url", "获取闪传链接", "get flash url", "闪传链接",
-                "下载闪传", "快传链接", "快传下载"
+                "下载闪传", "快传链接", "快传下载",
+                "闪传文件链接给我", "快传下载地址", "那个文件的闪传链接", "闪传怎么下载", "取闪传链接"
+                "快传链接发我", "闪传文件下载地址", "获取快传链接", "闪传直链", "下载闪传文件"
+                "闪传的URL", "快传文件链接", "闪传取件链接", "把闪传链接给我", "闪传文件地址"
+                "快传取链接", "闪传下载", "取件链接获取", "闪传文件提取", "快传直链给我"
             ],
             "handler": self.get_flash_file_url_tool
         }
@@ -4299,7 +4700,11 @@ class Main(Star):
             },
             "keywords": [
                 "发送闪传", "send flash", "闪传发送", "发闪传", "send flash msg",
-                "快传发送", "发快传", "闪传给别人"
+                "快传发送", "发快传", "闪传给别人",
+                "把闪传发给他", "闪传发给好友", "快传发到群里", "把传输任务发给某人", "闪传消息发送"
+                "发送那个闪传", "把快传发出去", "闪传分享给某人", "快传给他", "闪传发给群"
+                "发送快传任务", "闪传传给某人", "把那个闪传发了", "快传消息发送", "闪传送过去"
+                "发闪传链接", "快传发送给好友", "闪传群发", "把闪传分享出去", "发送传输链接"
             ],
             "handler": self.send_flash_msg_tool
         }
@@ -4316,7 +4721,12 @@ class Main(Star):
             },
             "keywords": [
                 "分享链接", "share link", "获取分享链接", "get share link", "文件分享",
-                "生成分享链接", "分享文件", "创建分享"
+                "生成分享链接", "分享文件", "创建分享",
+                "文件分享出去", "把文件链接弄出来", "创建分享链接", "分享这个文件", "文件外链生成"
+                "给我个分享地址", "把文件做成链接", "分享链接生成", "文件链接分享", "生成外链"
+                "文件分享码", "搞个分享链接", "文件共享链接", "分享地址生成", "链接分享出去"
+                "文件公开链接", "分享文件链接", "获取分享地址", "做个分享链接",
+                "生成一条分享链接"
             ],
             "handler": self.get_share_link_tool
         }
@@ -4333,7 +4743,11 @@ class Main(Star):
             },
             "keywords": [
                 "文件集信息", "fileset info", "查看文件集", "get fileset", "文件集详情",
-                "快传信息", "闪传信息"
+                "快传信息", "闪传信息",
+                "文件集里有什么", "看下文件集详情", "文件集包含什么", "这个文件集信息", "传输集查看"
+                "文件集内容", "查看文件包", "文件集状态", "文件集详情看看", "文件包信息"
+                "那批文件的信息", "文件集查询", "看下文件集", "文件集合信息", "文件组详情"
+                "文件集说明", "文件包内容查看", "文件集里几件", "查看传输内容", "文件集概况"
             ],
             "handler": self.get_fileset_info_tool
         }
@@ -4350,7 +4764,11 @@ class Main(Star):
             },
             "keywords": [
                 "分享码", "share code", "获取文件集ID", "get fileset id",
-                "通过分享码", "解析分享链接", "提取文件集"
+                "通过分享码", "解析分享链接", "提取文件集",
+                "解析这个分享码", "分享链接转ID", "通过分享码查文件", "把分享链接解析下", "分享码提取"
+                "这个链接的文件", "解析分享地址", "分享码对应内容", "链接转文件集", "分享码查询"
+                "提取分享内容", "解析取件码", "分享链接识别", "分享码看看", "取件码解析"
+                "分享链接对应文件", "解读分享码", "分享链接内容", "从链接取文件集", "分享码反查"
             ],
             "handler": self.get_fileset_id_tool
         }
@@ -4367,7 +4785,11 @@ class Main(Star):
             },
             "keywords": [
                 "下载文件集", "download fileset", "下载快传", "下载闪传",
-                "获取文件", "拉取文件"
+                "获取文件", "拉取文件",
+                "把这批文件下载下来", "文件集下载", "把分享的文件下到本地", "下载那个文件包", "取回那批文件"
+                "文件集保存本地", "把闪传内容下载", "下载分享的资料", "批量下载文件", "文件包拉取"
+                "下载传输内容", "把文件集拉下来", "保存文件集", "下载那堆文件", "取件下载"
+                "文件集落地", "全部下载", "把分享内容下载", "文件集获取", "下载到工作区"
             ],
             "handler": self.download_fileset_tool
         }
@@ -4385,7 +4807,11 @@ class Main(Star):
             },
             "keywords": [
                 "在线文件", "online file", "查看在线文件", "get online files",
-                "文件消息", "文件传输", "在线传输"
+                "文件消息", "文件传输", "在线传输",
+                "他给我发的文件看看", "有没有人给我传文件", "在线传的文件", "文件传输消息", "谁给我发过文件"
+                "收到的文件列表", "查看别人发的文件", "文件传输记录", "在线文件看看", "给我发的资料"
+                "收文件记录", "传给我的文件", "文件消息列表", "在线收发文件", "看看传文件记录"
+                "文件请求列表", "别人发的文件", "收到的资料", "传输消息查看", "文件往来记录"
             ],
             "handler": self.get_online_file_msg_tool
         }
@@ -4404,7 +4830,11 @@ class Main(Star):
             },
             "keywords": [
                 "发送文件", "send file", "在线发送文件", "send online file",
-                "传文件", "文件传输", "发个文件"
+                "传文件", "文件传输", "发个文件",
+                "把文件传给某人", "给好友发个文件", "发个压缩包给他", "传个文件过去", "把资料发给他"
+                "给他发送文档", "文件传给这个号", "发个安装包", "把表格发给他", "发文件给好友"
+                "传给他", "文件发出去", "发送这个文件", "给他递个文件", "把视频发给他"
+                "文件私发", "给某人传文件", "发个大文件", "文件直发", "把文档传给他"
             ],
             "handler": self.send_online_file_tool
         }
@@ -4423,7 +4853,11 @@ class Main(Star):
             },
             "keywords": [
                 "发送文件夹", "send folder", "在线发送文件夹", "send online folder",
-                "传文件夹", "文件夹传输"
+                "传文件夹", "文件夹传输",
+                "把整个文件夹传给他", "发个文件夹过去", "文件夹打包发送", "把目录传给好友", "整个文件夹发过去"
+                "传文件夹给某人", "发送整套文件", "文件夹一起发", "把资料夹传过去", "发整个目录"
+                "文件夹传输给他", "打包传文件夹", "批量传整个夹子", "发送文件夹内容", "目录发送给好友"
+                "文件夹递过去", "整套资料发送", "把文件夹传上去", "传个目录给他", "文件夹发送"
             ],
             "handler": self.send_online_folder_tool
         }
@@ -4442,7 +4876,11 @@ class Main(Star):
             },
             "keywords": [
                 "接收文件", "receive file", "接收在线文件", "receive online file",
-                "下载文件", "保存文件"
+                "下载文件", "保存文件",
+                "把那个文件收下", "接收他发的文件", "同意接收文件", "把传来的文件收了", "收文件操作"
+                "接受那个文件", "收下资料", "把文件收进来", "文件收一下", "接受传输"
+                "下载他发的文件", "接收传来的资料", "把那个附件收下", "收下他传的", "文件接受"
+                "同意收文件", "把文件保存下来", "收那个传的文件", "接受文件传输", "文件接收处理"
             ],
             "handler": self.receive_online_file_tool
         }
@@ -4461,7 +4899,11 @@ class Main(Star):
             },
             "keywords": [
                 "拒绝文件", "refuse file", "拒绝接收", "refuse online file",
-                "不接收", "取消接收"
+                "不接收", "取消接收",
+                "拒绝那个文件", "不要他发的文件", "拒收文件", "不接收那个文件", "把文件拒了"
+                "拒绝接收传输", "那个文件不要", "退回文件", "拒收那个资料", "不接受传输"
+                "文件退回去", "拒绝他的文件", "不收了", "拒收附件", "取消收那个文件"
+                "拒绝传来的文件", "那个文件拒掉", "不接受文件", "退回传输文件", "拒收处理"
             ],
             "handler": self.refuse_online_file_tool
         }
@@ -4479,7 +4921,12 @@ class Main(Star):
             },
             "keywords": [
                 "取消文件传输", "cancel file", "取消传输", "cancel online file",
-                "停止传输", "中断传输"
+                "停止传输", "中断传输",
+                "取消那个文件传输", "传输别传了", "停止传文件", "中断那个传输", "取消发送文件"
+                "传输停一下", "别传那个文件了", "取消正在传的", "停止文件发送", "取消传输任务"
+                "停掉传输", "那个文件不传了", "取消上传", "取消下载传输", "终止文件传输"
+                "传输取消操作", "把传输停了", "取消那个传送", "停止传送文件",
+                "把传输取消掉"
             ],
             "handler": self.cancel_online_file_tool
         }
@@ -4497,7 +4944,11 @@ class Main(Star):
             },
             "keywords": [
                 "执行代码", "运行代码", "run code", "执行python", "运行python",
-                "工作区", "workspace", "生成文件", "执行脚本", "python代码"
+                "工作区", "workspace", "生成文件", "执行脚本", "python代码",
+                "帮我写段代码跑一下", "用python算一下", "跑个脚本", "执行一段代码", "写代码生成文件"
+                "用代码处理数据", "python帮我处理", "运行个小程序", "代码算个结果", "跑一下程序"
+                "生成个excel", "画个图表出来", "处理下这份数据", "写个爬虫", "批量处理文件"
+                "代码实现一下", "帮我算个数学题", "转换文件格式", "数据分析一下", "运行python脚本"
             ],
             "handler": self.run_python_code_tool
         }
@@ -4508,7 +4959,11 @@ class Main(Star):
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
                 "工作区文件", "workspace files", "列出文件", "查看文件",
-                "文件列表", "有哪些文件", "list files"
+                "文件列表", "有哪些文件", "list files",
+                "工作区有什么文件", "看看生成的文件", "都有哪些文件在工作区", "文件都生成好了吗", "看下工作区目录"
+                "生成的图表有哪些", "工作区文件清单", "查一下工作区", "我生成的文件在哪", "文件列表看看"
+                "工作区内容", "生成了什么东西", "看下文件目录", "工作区都有啥", "文件在哪"
+                "列出工作区", "查看生成的资料", "工作区浏览", "文件盘点", "看下有什么产出"
             ],
             "handler": self.list_workspace_files_tool
         }
@@ -4525,7 +4980,11 @@ class Main(Star):
             },
             "keywords": [
                 "读取文件", "read file", "查看文件内容", "打开文件",
-                "读文件", "看文件"
+                "读文件", "看文件",
+                "打开那个文件看看", "文件内容是什么", "读一下那个文档", "看看文件里写了啥", "把文件内容给我"
+                "查看文件正文", "文件里是什么", "读取那个文件", "看下文件内容", "文件展示一下"
+                "读文件内容", "那个txt写了什么", "查看文档内容", "文件内容展示", "看下那个文本"
+                "读取文件信息", "文件打开", "文档读一下", "看看文件数据", "文件正文查看"
             ],
             "handler": self.read_workspace_file_tool
         }
@@ -4543,7 +5002,11 @@ class Main(Star):
             "keywords": [
                 "查看图片", "读取图片", "看图片", "read image", "view image", "图片内容",
                 "看看图", "打开图片", "查看图表", "看图表", "看看生成的图", "看截图",
-                "view chart", "show image", "open image", "check image", "inspect image"
+                "view chart", "show image", "open image", "check image", "inspect image",
+                "看看生成的图表", "那张图什么样", "打开看看那张图", "图生成对了吗", "看看截图"
+                "把图调出来看看", "查看那张图片", "图表看看效果", "看一下图片内容", "图长什么样"
+                "看看画出来的图", "截图看一下", "验证一下图片", "看看效果图", "图片查看"
+                "看看那张照片", "图能看看吗", "检查生成的图", "预览那张图", "看下图片效果"
             ],
             "handler": self.read_image_tool
         }
@@ -4565,7 +5028,11 @@ class Main(Star):
                 "发送文件", "send file", "发文件", "传文件", "发送图片", "send image",
                 "把文件发", "把图发", "文件发给", "图片发给", "发送到群", "发送到私聊",
                 "deliver file", "share file", "transfer file", "推送文件", "投递文件",
-                "发个工作区文件", "把生成的图发出去", "发过去", "file delivery"
+                "发个工作区文件", "把生成的图发出去", "发过去", "file delivery",
+                "把生成的文件发给我", "把图表发到群里", "发给我看看", "把文件发给某人", "把图片发出去"
+                "文件发到群里", "把那个文件传给我", "图片发群里", "结果文件发我", "把文档发给好友"
+                "发到私聊", "把成品发我", "文件外发", "把报告发群里", "图发给我"
+                "把生成的图发群里", "文件发送给好友", "把作业发过来", "发送成果文件", "把那个图发出去"
             ],
             "handler": self.send_file_tool
         }
@@ -4582,7 +5049,11 @@ class Main(Star):
             },
             "keywords": [
                 "删除文件", "delete file", "移除文件", "删文件",
-                "清除文件", "remove file"
+                "清除文件", "remove file",
+                "把那个文件删掉", "生成的文件不要了", "清理工作区文件", "删除生成的图", "那个文件清掉"
+                "工作区清理", "把多余文件删了", "文件删除", "删掉临时文件", "清空生成的文件"
+                "那个文档删了", "把废弃文件清了", "删除工作区内容", "清掉那个产物", "文件不要了删掉"
+                "删除那个图片", "清理垃圾文件", "删除生成的文档", "把旧文件清了", "工作区文件移除"
             ],
             "handler": self.delete_workspace_file_tool
         }
@@ -4600,7 +5071,11 @@ class Main(Star):
             },
             "keywords": [
                 "获取网页", "打开链接", "读取网页", "抓取网页",
-                "fetch url", "read webpage", "get content"
+                "fetch url", "read webpage", "get content",
+                "帮我打开这个链接", "这个网页讲了什么", "看看这个网址内容", "读一下这篇文章", "把这个链接内容给我"
+                "网页内容抓取", "打开这个网址看看", "这个链接说了什么", "帮我读网页", "访问这个链接看看"
+                "文章内容提取", "链接内容总结", "网页正文给我", "看下这个页面", "读取链接内容"
+                "帮我抓取这个网页", "这个网址是什么内容", "网页信息获取", "链接打开看看", "读取网页正文"
             ],
             "handler": self.fetch_url_tool
         }
@@ -4616,7 +5091,11 @@ class Main(Star):
                 },
                 "required": ["keyword"]
             },
-            "keywords": ["搜索", "百度搜索", "必应搜索", "谷歌搜索", "search"],
+            "keywords": ["搜索", "百度搜索", "必应搜索", "谷歌搜索", "search",
+                "帮我搜一下", "上网查查", "百度一下", "搜索这个关键词", "查查资料"
+                "帮我百度", "网上搜索", "用谷歌搜", "必应搜一下", "查一下这个东西"
+                "搜索结果看看", "上网找找", "查个资料", "帮我查查这个", "搜索引擎搜下"
+                "搜搜看", "帮我搜信息", "查找相关资料", "网上查一下", "搜索一下资讯"],
             "handler": self.browser_search_tool
         }
 
@@ -4630,7 +5109,11 @@ class Main(Star):
                 },
                 "required": ["url"]
             },
-            "keywords": ["访问链接", "打开网址", "visit url", "open url"],
+            "keywords": ["访问链接", "打开网址", "visit url", "open url",
+                "打开这个网站", "访问这个网址", "去这个页面看看", "打开某网站", "进入这个链接"
+                "浏览这个网址", "打开某网页", "去逛逛这个站", "访问某页", "帮我开个网站"
+                "打开指定网址", "进这个站点", "网页打开", "去这个地址", "浏览某页面"
+                "打开链接看看", "进入网站", "访问页面", "开下这个网址", "打开那个站点"],
             "handler": self.browser_visit_tool
         }
 
@@ -4645,7 +5128,11 @@ class Main(Star):
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["点击坐标", "click coord", "点击位置", "点击", "click", "点击按钮", "点击元素", "点一下"],
+            "keywords": ["点击坐标", "click coord", "点击位置", "点击", "click", "点击按钮", "点击元素", "点一下",
+                "帮我点一下", "点那个按钮", "点击搜索按钮", "把那个链接点开", "点提交"
+                "点一下那个位置", "帮我点确认", "点开它", "点击那个选项", "按下那个按钮"
+                "点击登录", "点那个地方", "点确认按钮", "帮我按一下", "点击菜单"
+                "点开那个", "按钮点一下", "点击下一步", "点同意", "点击它"],
             "handler": self.browser_click_tool
         }
 
@@ -4660,7 +5147,11 @@ class Main(Star):
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["双击", "double click", "连点两下"],
+            "keywords": ["双击", "double click", "连点两下",
+                "双击打开", "双击那个位置", "连击两下", "双击选中文本", "双击那个词"
+                "双击操作", "双击此处", "双击那个图标", "双击打开文件", "快速点两下"
+                "双击它", "双击那里", "double点", "双击选中", "双击进入"
+                "双击文件夹", "双击屏幕", "两连击", "双击那个字", "双击位置"],
             "handler": self.browser_double_click_tool
         }
 
@@ -4675,7 +5166,11 @@ class Main(Star):
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["右键", "right click", "右击", "上下文菜单"],
+            "keywords": ["右键", "right click", "右击", "上下文菜单",
+                "右键点一下", "右击那个位置", "弹出右键菜单", "右键打开菜单", "右键点它"
+                "右键操作", "右击一下", "右键点那里", "调出右键菜单", "鼠标右键"
+                "右键点击", "右键那个", "右击菜单", "右键菜单弹出", "右键此处"
+                "右键点击位置", "右击它", "右键唤起菜单", "右键一下", "右键选中"],
             "handler": self.browser_right_click_tool
         }
 
@@ -4691,7 +5186,11 @@ class Main(Star):
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["长按", "long press", "按住不放", "长击"],
+            "keywords": ["长按", "long press", "按住不放", "长击",
+                "按住不放一会儿", "长按那个位置", "长按出菜单", "按住它", "长按操作"
+                "长按那个按钮", "长按两秒", "按住别松开", "长按弹出", "长按那里"
+                "长按选中", "按住几秒", "长按此位置", "长按一下", "长按那个词"
+                "长按唤起", "按住不放操作", "长按屏幕", "长按元素", "长按三秒"],
             "handler": self.browser_long_press_tool
         }
 
@@ -4709,7 +5208,11 @@ class Main(Star):
                 },
                 "required": ["start_x", "start_y", "end_x", "end_y"]
             },
-            "keywords": ["拖拽", "拖动", "drag", "滑动", "swipe", "拉动", "拖滑块"],
+            "keywords": ["拖拽", "拖动", "drag", "滑动", "swipe", "拉动", "拖滑块",
+                "拖动滑块验证", "把滑块拖过去", "拖拽那个元素", "滑动到下面", "拖动进度条"
+                "把方块拖到位", "拖动排序", "拖拽操作", "把那个拖下来", "滑块拼图拖动"
+                "拖动滚动条", "把元素拖到位置", "拖一下", "拖动验证", "拖拽移动"
+                "把图片拖过去", "滑动验证码", "拖动到目标", "拖拽文件", "滑动屏幕"],
             "handler": self.browser_drag_tool
         }
 
@@ -4726,7 +5229,11 @@ class Main(Star):
                 },
                 "required": ["x", "y", "text"]
             },
-            "keywords": ["输入文字", "input text", "填写输入框", "填写表单", "输入内容", "打字", "type text"],
+            "keywords": ["输入文字", "input text", "填写输入框", "填写表单", "输入内容", "打字", "type text",
+                "在那个框里输入", "点击输入框打字", "往搜索框输入", "在输入框填上", "在那个位置打字"
+                "输入到指定位置", "在框里填内容", "表单填写并提交", "在那个格子输入", "点那个框输入文字"
+                "输入并回车", "在输入框写字", "坐标处输入文字", "在搜索框里打字", "填入内容提交"
+                "在那个输入位打字", "输入框输入内容", "在那里输入", "指定位置输入", "输入文字后回车"],
             "handler": self.browser_input_at_tool
         }
 
@@ -4741,7 +5248,11 @@ class Main(Star):
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["悬停", "hover", "悬浮", "鼠标移上去"],
+            "keywords": ["悬停", "hover", "悬浮", "鼠标移上去",
+                "鼠标放上去看看", "悬停看下拉", "把鼠标移到那", "悬浮显示菜单", "移过去看看提示"
+                "hover那个位置", "鼠标指着它", "悬停触发", "鼠标移到按钮上", "悬浮在那"
+                "悬停查看详情", "鼠标停留", "移上去看菜单", "悬停展开", "指着那个元素"
+                "悬浮提示看看", "悬停菜单", "移到那个位置停一下", "hover查看", "鼠标悬浮"],
             "handler": self.browser_hover_tool
         }
 
@@ -4756,7 +5267,11 @@ class Main(Star):
                 },
                 "required": ["text"]
             },
-            "keywords": ["输入文字", "input text", "填写输入框"],
+            "keywords": ["输入文字", "input text", "填写输入框",
+                "在输入框打字", "帮我填一下内容", "输入这段文字", "把内容填进去", "在框里写"
+                "打字输入内容", "填入文字", "输入后回车", "把文字敲进去", "填写内容"
+                "输入关键词", "把这句话输进去", "输入文字搜索", "内容填入输入框", "帮我输入"
+                "打上这几个字", "输入信息", "敲入文字", "填个内容", "文字输入"],
             "handler": self.browser_input_tool
         }
 
@@ -4770,7 +5285,11 @@ class Main(Star):
                     "distance": {"type": "integer", "description": "滚动距离，默认1300"}
                 }
             },
-            "keywords": ["滚动页面", "scroll", "上下滚动"],
+            "keywords": ["滚动页面", "scroll", "上下滚动",
+                "往下翻翻", "页面往下滚", "向上滚动看看", "滚到页面底部", "翻到下一屏"
+                "往回翻", "页面下滑", "滚到最下面", "往上翻页", "滚动查看更多"
+                "往下看内容", "滑到页面顶部", "页面滚动一下", "翻页看看", "向下翻"
+                "继续往下滚", "滚回顶部", "往上滑", "多翻几页", "页面上下滚动"],
             "handler": self.browser_scroll_tool
         }
 
@@ -4786,7 +5305,11 @@ class Main(Star):
                     "seconds": {"type": "integer", "description": "等待秒数（5-45），默认10"}
                 }
             },
-            "keywords": ["等待", "等待页面", "wait", "等待加载", "等一下", "倒计时", "页面跳转"],
+            "keywords": ["等待", "等待页面", "wait", "等待加载", "等一下", "倒计时", "页面跳转",
+                "等页面加载完", "等几秒再看", "等它转完", "等一下再看结果", "页面还在转圈"
+                "等倒计时结束", "等验证码倒计时", "等它跳转完", "稍等再截图", "等待几秒钟"
+                "等加载", "等跳转完成", "过几秒再看", "等结果出来", "等动画放完"
+                "等一下下", "等待响应", "等它出现", "稍等片刻再看", "等待页面就绪"],
             "handler": self.browser_wait_tool
         }
 
@@ -4799,7 +5322,11 @@ class Main(Star):
                     "scale": {"type": "number", "description": "缩放比例，默认1.5"}
                 }
             },
-            "keywords": ["缩放", "zoom", "放大缩小"],
+            "keywords": ["缩放", "zoom", "放大缩小",
+                "页面放大一点", "放大看清楚", "缩小页面", "把字调大", "缩放比例调整"
+                "放大150%", "页面放大些", "缩小一点", "调大显示", "页面缩放"
+                "放大页面内容", "把页面缩小看全貌", "字号放大", "缩放到两倍", "页面变大"
+                "页面变小", "调整显示比例", "放大细看", "缩小整页", "zoom调整"],
             "handler": self.browser_zoom_tool
         }
 
@@ -4813,7 +5340,11 @@ class Main(Star):
                     "zoom_factor": {"type": "number", "description": "截图缩放比例，可选"}
                 }
             },
-            "keywords": ["截图", "screenshot", "截取页面", "获取验证码"],
+            "keywords": ["截图", "screenshot", "截取页面", "获取验证码",
+                "截个图给我", "把页面拍下来", "截屏看看", "截一下当前页面", "整页截图"
+                "截个长图", "页面拍照", "帮我截屏", "截图保存", "把画面截下来"
+                "截取整页内容", "当前画面截图", "截下来发我", "网页截图操作", "长截图"
+                "拍个照看看", "截全页", "截屏操作", "把屏幕截下来", "页面截图保存"],
             "handler": self.browser_screenshot_tool
         }
 
@@ -4824,7 +5355,11 @@ class Main(Star):
                 "type": "object",
                 "properties": {}
             },
-            "keywords": ["返回", "go back", "上一页"],
+            "keywords": ["返回", "go back", "上一页",
+                "回到上一个页面", "退回上一页", "页面返回", "后退一步", "回退页面"
+                "返回刚才的页面", "回去上一页", "倒回去", "往回退", "回到之前页面"
+                "返回上一步", "退回去", "回退一下", "页面回退", "回到前面页面"
+                "退回刚才", "向后退页", "退回浏览", "返回先前页面", "浏览器后退"],
             "handler": self.browser_back_tool
         }
 
@@ -4835,7 +5370,11 @@ class Main(Star):
                 "type": "object",
                 "properties": {}
             },
-            "keywords": ["前进", "go forward", "下一页"],
+            "keywords": ["前进", "go forward", "下一页",
+                "前进到下一页", "往前翻页", "页面前进", "回到刚才前进", "前进操作"
+                "向前进页面", "到下一页去", "前进一下", "页面往前进", "回到前进的页面"
+                "向前翻", "前进到那个页面", "forward前进", "页面前进操作", "往前走一页"
+                "前进退回", "向前翻页", "前进浏览", "下一页前进", "浏览器前进"],
             "handler": self.browser_forward_tool
         }
 
@@ -4848,7 +5387,11 @@ class Main(Star):
                     "index": {"type": "integer", "description": "标签页序号（从1开始），不填则查看所有标签页"}
                 }
             },
-            "keywords": ["标签页", "tabs", "切换标签", "查看标签"],
+            "keywords": ["标签页", "tabs", "切换标签", "查看标签",
+                "看看开了哪些网页", "有几个标签页", "切换到另一个页面", "切到第几个标签", "查看打开的页面"
+                "标签页有哪些", "换个标签页", "切到那个页面", "开了几个网页", "页面切换"
+                "看看开着的页", "切换网页", "标签页查看", "切到二号页", "多标签管理"
+                "查看标签页列表", "切换到新页", "标签切换", "看看网页列表", "切其他页"],
             "handler": self.browser_tabs_tool
         }
 
@@ -4862,7 +5405,11 @@ class Main(Star):
                 },
                 "required": ["index"]
             },
-            "keywords": ["关闭标签", "close tab"],
+            "keywords": ["关闭标签", "close tab",
+                "关掉那个标签页", "把这个页面关了", "关闭第几个标签", "那个网页不用了关掉", "关一个标签"
+                "关掉多余的页面", "标签页关闭", "关掉这个网页", "把那个页面关掉", "关闭多余标签"
+                "关tab", "那个页签关了", "关掉二号标签", "关闭指定页面", "把标签关了"
+                "关掉这个页签", "页面关闭一个", "关掉不要的页面", "关闭某个标签", "tab关闭"],
             "handler": self.browser_close_tab_tool
         }
 
@@ -4873,7 +5420,11 @@ class Main(Star):
                 "type": "object",
                 "properties": {}
             },
-            "keywords": ["关闭浏览器", "close browser"],
+            "keywords": ["关闭浏览器", "close browser",
+                "把浏览器关了", "浏览器不用了", "关闭整个浏览器", "退出浏览器", "浏览器关掉"
+                "把浏览器退出", "不用浏览器了关掉", "关闭浏览器进程", "浏览器退出", "关掉浏览器程序"
+                "浏览器收工", "关浏览器操作", "结束浏览器", "浏览器关闭一下", "全部关掉浏览器"
+                "浏览器下线", "关掉网页浏览器", "浏览器停止", "关了浏览器吧", "退出网页浏览"],
             "handler": self.browser_close_tool
         }
 
@@ -4887,7 +5438,11 @@ class Main(Star):
                 },
                 "required": ["text"]
             },
-            "keywords": ["对话", "发送消息", "chat"],
+            "keywords": ["对话", "发送消息", "chat",
+                "在那个网页输入框里发", "把这句话发到网页上", "往页面输入框发内容", "网页里发送这句话", "在页面里说话"
+                "向网页对话框发送", "在那个聊天框发送", "页面输入发送", "把内容发到那个网站", "网页发送内容"
+                "在那个框发送消息", "往对话框输入发送", "在网页上回复", "页面发个消息", "网页对话框发送"
+                "把文字发到页面", "在那个网站发消息", "页面聊天发送", "网页输入框发送", "向页面发送文字"],
             "handler": self.browser_chat_tool
         }
 
@@ -4898,7 +5453,11 @@ class Main(Star):
                 "type": "object",
                 "properties": {}
             },
-            "keywords": ["收藏夹", "查看收藏", "favorites"],
+            "keywords": ["收藏夹", "查看收藏", "favorites",
+                "看看收藏的网站", "收藏夹里有什么", "我的收藏列表", "都收藏了哪些", "收藏的网址看看"
+                "收藏夹内容", "看看书签", "收藏列表展示", "有哪些收藏", "收藏夹打开"
+                "书签列表", "我的收藏夹", "收藏了什么网站", "收藏夹查看", "收藏记录"
+                "看看收藏清单", "收藏站点列表", "书签查看", "收藏夹一览", "收藏的页面"],
             "handler": self.browser_favorite_list_tool
         }
 
@@ -4913,7 +5472,11 @@ class Main(Star):
                 },
                 "required": ["name", "url"]
             },
-            "keywords": ["添加收藏", "收藏链接", "add favorite"],
+            "keywords": ["添加收藏", "收藏链接", "add favorite",
+                "把这个网站收藏", "收藏这个链接", "加到收藏夹", "把网址存收藏", "收藏一下这个页面"
+                "保存到收藏夹", "这个网站不错收藏下", "添加书签", "把链接收进收藏", "收藏该网址"
+                "加个书签", "把这个收藏起来", "网址收藏", "页面收藏一下", "收藏此链接"
+                "加入收藏夹", "存个书签", "收藏当前网站", "把这条链接收藏", "添加到收藏"],
             "handler": self.browser_favorite_add_tool
         }
 
@@ -4927,7 +5490,11 @@ class Main(Star):
                 },
                 "required": ["name"]
             },
-            "keywords": ["删除收藏", "取消收藏", "delete favorite"],
+            "keywords": ["删除收藏", "取消收藏", "delete favorite",
+                "把那个收藏删了", "取消收藏这个", "收藏夹里去掉", "删除那条收藏", "不要这个收藏了"
+                "把书签删掉", "移除收藏", "那个收藏不要了", "删除收藏夹里的", "取消那条书签"
+                "清掉那个收藏", "收藏移除", "把这条收藏清理", "删掉书签", "那个网站取消收藏"
+                "移除那条收藏", "收藏夹清理", "删除不要的收藏", "取消书签", "收藏删除"],
             "handler": self.browser_favorite_delete_tool
         }
 
@@ -4940,7 +5507,11 @@ class Main(Star):
                     "browser_type": {"type": "string", "description": "浏览器类型：chromium/firefox/webkit，默认chromium"}
                 }
             },
-            "keywords": ["安装浏览器", "install browser"],
+            "keywords": ["安装浏览器", "install browser",
+                "浏览器没装怎么办", "安装浏览器内核", "装个chromium", "浏览器环境安装", "安装浏览器驱动"
+                "下载浏览器组件", "初始化浏览器", "装firefox", "浏览器配置安装", "安装webkit"
+                "浏览器缺失安装", "浏览器组件下载", "安装无头浏览器", "浏览器依赖安装", "装浏览器内核"
+                "chromium安装", "浏览器安装服务", "自动装浏览器", "浏览器初始化安装", "安装playwright浏览器"],
             "handler": self.browser_install_tool
         }
 
@@ -4954,7 +5525,11 @@ class Main(Star):
                 },
                 "required": ["url"]
             },
-            "keywords": ["打开网页", "open page", "浏览器打开"],
+            "keywords": ["打开网页", "open page", "浏览器打开",
+                "简单打开个网页", "快速打开链接", "开个页面看看", "浏览器开下这个", "轻量打开网页"
+                "直接开这个网址", "打开网页看看", "帮我开个网页", "打开这个站点", "开个链接"
+                "快速浏览网页", "打开个网站", "网页打开一下", "开这个页面", "打开URL"
+                "访问网页看看", "打开网址内容", "开启网页", "浏览这个链接", "网页快速访问"],
             "handler": self.open_page_tool
         }
 
@@ -4967,7 +5542,11 @@ class Main(Star):
                     "save_path": {"type": "string", "description": "保存路径（可选，默认保存到工作区）"}
                 }
             },
-            "keywords": ["截图", "screenshot", "截取网页", "获取验证码"],
+            "keywords": ["截图", "screenshot", "截取网页", "获取验证码",
+                "把网页截个图", "网页拍照给我", "截一下这个网页", "网页画面截取", "网站截图保存"
+                "把当前网页拍下", "网页快照", "截取网页画面", "网页图截一下", "给网页拍照"
+                "页面快照", "网页截屏保存", "网页画面捕捉", "截取当前网页", "保存网页截图"
+                "网页图片截取", "网站页面截图", "网页相片", "网页显示截图", "截网页给我"],
             "handler": self.screenshot_page_tool
         }
 
@@ -4978,7 +5557,11 @@ class Main(Star):
                 "type": "object",
                 "properties": {}
             },
-            "keywords": ["关闭浏览器", "close page", "关闭网页"],
+            "keywords": ["关闭浏览器", "close page", "关闭网页",
+                "把网页关了", "关闭这个页面", "网页不用了", "退出网页", "关掉当前页面"
+                "把那个网页关掉", "网页关闭", "关页面", "页面关掉", "关闭打开的网页"
+                "退出当前网页", "把页面关了", "网页结束", "关掉网页吧", "网页退出"
+                "关闭简易浏览器", "关掉打开的页面", "网页收尾", "关闭当前页", "把开的页面关了"],
             "handler": self.close_page_tool
         }
 
@@ -4997,7 +5580,11 @@ class Main(Star):
             },
             "keywords": [
                 "删除好友", "删好友", "delete friend", "移除好友", "拉黑",
-                "解除好友关系", "断交", "删除联系人", "remove friend"
+                "解除好友关系", "断交", "删除联系人", "remove friend",
+                "把他删了", "跟这个人绝交", "把这个好友删掉", "拉黑并删除", "好友不要了"
+                "删除那个好友", "把他从好友删了", "跟他断绝关系", "双向删除好友", "删掉这个联系人"
+                "那个号删好友", "好友移除", "把他加黑名单", "删除并拉黑", "好友关系解除"
+                "删掉他", "这个好友踢出列表", "好友清理", "跟某人解除好友", "删除好友关系"
             ],
             "handler": self.delete_friend_tool
         }
@@ -5031,7 +5618,11 @@ class Main(Star):
                 "验证码", "人机验证", "人机校验", "滑块", "拼图", "点选验证", "图形验证",
                 "短信验证", "手机验证", "人脸识别", "实名认证", "无法自动完成", "自动不了",
                 "卡住了", "卡住", "搞不定", "需要真人", "真人操作", "手动操作", "帮我操作",
-                "takeover", "captcha", "human verification", "manual operation"
+                "takeover", "captcha", "human verification", "manual operation",
+                "这个验证码我帮你过", "我来手动操作", "换成人工处理", "让我来点", "接管一下浏览器"
+                "我来帮你滑", "人工通过验证", "我上手操作", "把控制权给我", "我来处理这一步"
+                "帮我接管页面", "人工介入", "我手动通过", "把浏览器交给我", "我来完成验证"
+                "人工接管页面", "让我操作浏览器", "转给我操作", "我接管这一步", "由我来操作"
             ],
             "handler": self.request_browser_takeover_tool
         }
@@ -5045,32 +5636,77 @@ class Main(Star):
     # ==================== LLM 工具 ====================
     @filter.llm_tool(name="search_wyc_tools")
     async def search_wyc_tools(self, event: AstrMessageEvent, query: str) -> dict:
-        """【必须优先使用】根据简短关键词搜索匹配的工具。请使用单个词语或短语（如"邮箱"、"禁言"、"发说说"），不要使用完整问句。
+        """【必须优先使用】根据关键词搜索匹配的工具。支持同时搜索多个关键词（用空格或逗号分隔，如"记忆 添加"、"邮箱,发送"、"群 禁言"），关键词间为"或"关系，同时命中多个关键词的工具会排在最前。请使用简短词语（如"邮箱"、"禁言"、"发说说"），不要使用完整问句。
         
         Args:
-            query(string): 搜索关键词（如"记忆"、"邮件"、"禁言"），必填
+            query(string): 搜索关键词，支持多个（用空格或逗号分隔，如"记忆 添加"、"群 禁言"），必填
         """
         if not query or not query.strip():
             return {"status": "error", "message": "请提供搜索关键词（简短词语，如邮箱、禁言）"}
         available_tools = self._get_available_tools(event)
-        query_lower = query.strip().lower()
-        matched = []
+        # 多关键词切分：空格 / 中英文逗号 / 顿号 / 中英文分号 / 斜杠 / 竖线（保留首个出现顺序，大小写不敏感去重）
+        terms = []
+        seen_terms = set()
+        for t in re.split(r"[\s,，、;；/|｜]+", query.strip()):
+            key = t.lower()
+            if t and key not in seen_terms:
+                seen_terms.add(key)
+                terms.append(t)
+        if not terms:
+            return {"status": "error", "message": "请提供搜索关键词（简短词语，如邮箱、禁言）"}
+        # 计分匹配：每个关键词独立判定，命中越多分越高、排序越靠前
+        # 权重：工具名精确 +8 > 关键词精确 +6 > 工具名包含 +4 > 关键词包含 +2 > 描述包含 +1
+        scored = []  # (score, hit_count, name, meta, hit_terms)
+        unmatched = set(t.lower() for t in terms)
         for name, meta in available_tools.items():
-            keywords = self._get_tool_keywords(name)
-            if (query_lower in name.lower() or
-                query_lower in meta["description"].lower() or
-                any(query_lower in kw.lower() for kw in keywords)):
-                matched.append({
-                    "name": name,
-                    "description": meta["description"],
-                    "parameters": meta["parameters"]
-                })
-        if not matched:
+            name_lower = name.lower()
+            desc_lower = meta["description"].lower()
+            keywords_lower = [kw.lower() for kw in self._get_tool_keywords(name)]
+            score = 0
+            hit_terms = []
+            for term in terms:
+                term_lower = term.lower()
+                hit = False
+                if term_lower == name_lower:
+                    score += 8
+                    hit = True
+                elif term_lower in name_lower:
+                    score += 4
+                    hit = True
+                if term_lower in keywords_lower:
+                    score += 6
+                    hit = True
+                elif any(term_lower in kw for kw in keywords_lower):
+                    score += 2
+                    hit = True
+                if term_lower in desc_lower:
+                    score += 1
+                    hit = True
+                if hit:
+                    hit_terms.append(term)
+                    unmatched.discard(term_lower)
+            if score > 0:
+                scored.append((score, len(hit_terms), name, meta, hit_terms))
+        if not scored:
             return {"status": "success", "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_wyc_tools 查看全部可用工具。"}
-        result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
-        for tool in matched[:10]:
-            result_lines.append(f"- {tool['name']}: {tool['description'][:60]}...")
-        return {"status": "success", "message": "\n".join(result_lines), "tools": matched}
+        # 排序：命中关键词数多者优先，其次总分高者优先，最后按名称保证稳定
+        scored.sort(key=lambda x: (-x[1], -x[0], x[2]))
+        matched = [
+            {"name": n, "description": m["description"], "parameters": m["parameters"]}
+            for _, _, n, m, _ in scored
+        ]
+        result_lines = [f"🔍 找到 {len(matched)} 个相关工具（按关键词命中数排序）："]
+        for _, _, n, m, hits in scored[:10]:
+            result_lines.append(f"- {n}（命中: {'、'.join(hits)}）: {m['description'][:60]}...")
+        tips = []
+        if unmatched:
+            tips.append("关键词「" + "」「".join(sorted(unmatched)) + "」未匹配到任何工具")
+        if len(matched) > 10:
+            tips.append(f"仅展示前 10 个，完整列表见 tools 字段（共 {len(matched)} 个）")
+        msg = "\n".join(result_lines)
+        if tips:
+            msg += "\n💡 " + "；".join(tips)
+        return {"status": "success", "message": msg, "tools": matched}
 
     @filter.llm_tool(name="call_wyc_tools")
     async def call_wyc_tools(self, event: AstrMessageEvent, **kwargs) -> dict:
@@ -6228,6 +6864,14 @@ class Main(Star):
                 self._rebuild_custom_tools()
             except Exception as e:
                 logger.warning(f"[QZoneTools] 自定义工具配置热更新失败: {_safe_error_msg(e)}")
+            # 记忆外部 API（v5.10.0）：开关/地址/端口变化时重启服务（token 动态读取，即时生效）
+            if any(k in safe_config for k in (
+                "memory_api_enabled", "memory_api_host", "memory_api_port",
+            )):
+                try:
+                    await self._sync_memory_api_server()
+                except Exception as e:
+                    logger.warning(f"[MemoryAPI] 热更新失败: {_safe_error_msg(e)}")
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
@@ -6866,6 +7510,11 @@ class Main(Star):
 
     async def initialize(self):
         self._register_page_routes()
+        # 记忆外部 API（v5.10.0）：启用时启动独立 HTTP 服务（失败不影响插件启动）
+        try:
+            await self._sync_memory_api_server()
+        except Exception as e:
+            logger.warning(f"[MemoryAPI] 启动失败（功能不可用）: {_safe_error_msg(e)}")
         self.status_manager.set_db_manager(self.db_manager)
         self.command_executor = ScheduledCommandExecutor(self)
         # 所有后台任务均保存引用，避免被 GC 回收 + 便于 terminate 时统一取消
@@ -6880,6 +7529,37 @@ class Main(Star):
         self._init_browser_advanced()
 
         logger.info(f"[Main] 插件已加载")
+
+    async def _sync_memory_api_server(self):
+        """记忆外部 API（v5.10.0）：按当前配置启动 / 重启 / 停止 HTTP 服务。
+
+        - enabled=false：停止并清空（幂等）。
+        - enabled=true：整体重建（服务无状态、重建开销可忽略，host/port 直接生效；
+          token 是运行时动态读取的，改 token 无需重启）。
+        """
+        enabled = bool(self.config.get("memory_api_enabled", False))
+        if not enabled:
+            if self._memory_api_server is not None:
+                await self._memory_api_server.stop()
+                self._memory_api_server = None
+                logger.info("[MemoryAPI] 记忆外部 API 已关闭")
+            return
+
+        if self._memory_api_server is not None:
+            await self._memory_api_server.stop()
+            self._memory_api_server = None
+        server = MemoryApiServer(self.memory_manager, self.config)
+        await server.start()
+        self._memory_api_server = server
+        if not server.token:
+            logger.warning(
+                "[MemoryAPI] 记忆外部 API 已启动，但未设置 memory_api_token，"
+                "所有请求都会被拒绝。请在插件配置中设置访问令牌。"
+            )
+        logger.info(
+            f"[MemoryAPI] 记忆外部 API 已启动: http://{server.host}:{server.port}"
+            f"/memories?user_id=<QQ号>"
+        )
 
     def _create_bg_task(self, coro, name: str) -> asyncio.Task:
         """创建并登记后台任务：保存引用 + 统一异常日志，防止静默失败与 GC 回收。"""
@@ -7106,7 +7786,15 @@ class Main(Star):
             except Exception as e:
                 logger.warning(f"[Browser] 关闭浏览器失败: {e}")
 
-        # 7) 等待被取消的任务真正结束，避免 "Task was destroyed" 警告
+        # 7) 停止记忆外部 API 服务（v5.10.0）
+        if self._memory_api_server:
+            try:
+                await self._memory_api_server.stop()
+            except Exception as e:
+                logger.warning(f"[MemoryAPI] 停止失败: {_safe_error_msg(e)}")
+            self._memory_api_server = None
+
+        # 8) 等待被取消的任务真正结束，避免 "Task was destroyed" 警告
         pending = [t for t in bg_snapshot if not t.done()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
@@ -10955,55 +11643,53 @@ AI语音: get_ai_characters, send_ai_voice
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     # ==================== 提示词注入 ====================
+    # 提示词注入（遵循 anthropics/skills skill-creator 原则）：
+    # 1) 渐进披露——插件自带 search/call 两级按需发现，注入文本只保留协议与入口，
+    #    不再内嵌静态工具目录（旧目录 56 个简称中 43 个并非真实关键词，且缺约 50 个新工具，纯误导）
+    # 2) 解释 why——用理由代替命令式 MUST，模型理解原因后泛化更好
+    # 3) 精简——移除不出力的内容，动态信息（状态/记忆/身份）由 on_llm_request 按需注入
     _TOOL_PROMPT = """【QZoneTools 插件工具使用说明】
 
-本插件为机器人提供了大量扩展能力，涵盖QQ空间操作、群聊管理、消息发送、记忆存储、AI语音、历史消息查询等功能。你需要通过一套标准的三步调用流程来使用这些工具，不能直接猜测或编造工具名称。
+本插件为机器人扩展了大量工具，涵盖记忆、消息与定时、QQ空间、群管理、群文件、AI语音、
+联系人查询、聊天记录、文件传输、Python 代码执行、工作区文件、网页抓取和浏览器自动化。
+工具清单会随配置动态变化（管理员可启用/禁用/新增工具），所以不要背清单，按需查询即可。
 
-工具调用流程：
-第一步 — 搜索工具。调用 search_wyc_tools 并传入简短关键词，系统会根据关键词模糊匹配并返回相关的工具列表。注意关键词必须是简短词语，不要使用完整的问句。
-第二步 — 查看全部工具。如果第一步搜索后没有找到你需要的工具，调用 call_wyc_tools 获取当前已启用的全部工具名称和简要说明列表。这个工具不需要任何参数。
-第三步 — 执行工具。确定工具名称后，调用 run_wyc_tool 并传入两个参数：tool_name 是你要执行的具体工具名称，args 是该工具所需的参数（以 JSON 对象格式传入）。
+三步调用流程：
+1. search_wyc_tools —— 传简短关键词，支持一次传多个（空格或逗号分隔，如"记忆 添加"），命中关键词越多的工具排得越靠前。
+2. call_wyc_tools —— 第 1 步没找到时用，返回当前已启用的全部工具与说明（无需参数）。
+3. run_wyc_tool —— 传 tool_name 与 JSON 格式的 args 执行。
 
-工具完整清单（每个工具对应一个二字简称，可直接作为关键词搜索）：
+为什么要先搜再调：工具名无法靠猜，猜错的名称会被系统直接拒绝，白白浪费一轮对话；
+搜索既能确认工具存在，也能拿到正确的参数格式。已确切知道工具名时可直接执行，但禁止编造名称。
 
-记忆管理类：加忆（添加用户记忆）、搜忆（搜索记忆）、改忆（更新记忆内容）、删忆（删除指定记忆）、详忆（获取单条记忆详情）
-消息发送类：发信（主动发送消息到群聊或私聊）、定信（创建一次性定时消息）、列信（查看待执行的定时消息）、取消（取消已创建的定时消息）
-高级定时类：创建定（创建持久化高级定时指令，支持发空间、改状态、LLM提醒）、列定（查看所有高级定时指令）、取消定（取消未执行的高级定时指令）、删定（删除指定的高级定时指令）
-QQ空间与互动：发说（发表QQ空间说说）、戳戳（发送戳一戳/窗口抖动）
-状态管理：改态（修改QQ在线状态）、查态（查看当前QQ状态）、乐态（获取可用的娱乐状态列表）
-其他操作：撤回（引用消息撤回，仅限群聊2分钟内）、邮件（通过QQ邮箱发送邮件）
-联系人：搜人（模糊搜索好友或群聊）、列人（列出全部联系人或群聊列表）
-群成员：身份（查询指定用户在群内的身份是群主、管理员还是成员）
-群精华：设精（将某条消息设为精华消息）、删精（取消精华消息）
-群处罚与名片：禁言（对指定成员禁言或解禁）、踢人（将成员移出群聊）、全禁（开启或关闭全体禁言）、名片（修改群成员在群内的昵称）
-群公告：公告（发布群公告）、删告（删除指定公告）、列告（查看群公告列表）
-群文件：列件（查看群文件列表）、删件（删除指定文件）、上传（上传文件到群文件）、建夹（在群文件创建文件夹）、删夹（删除群文件夹及其内容）、移件（移动群文件到其他目录）、改名（重命名群文件）、传链（获取文件传输链接）
-群配置：成员（获取群成员列表及详细信息）、管管（设置或取消群管理员）、群名（修改群名称）、荣誉（查询群聊荣誉信息）、全体（查看@全体成员剩余次数）、头衔（设置群成员专属头衔）、禁列（获取当前被禁言的成员列表）、加审（查看被忽略的加群请求）、设审（设置加群方式为允许/需验证/禁止）、打卡（执行群打卡签到）
-AI语音：角色（获取可用的AI语音角色列表）、语音（发送指定文本的AI语音消息到群聊）
-个人资料：资料（修改机器人昵称和个性签名）、头像（设置机器人QQ头像）、群头（设置群聊头像）
-历史消息：群史（获取群聊最近的消息记录，可指定条数）、友史（获取与好友的私聊消息记录）
-其他：表情（获取机器人账号下的自定义表情列表）、输入（手动设置或取消输入状态/正在输入中）、点赞（给指定QQ用户发送名片赞）
-
-每次需要使用以上任一工具时，务必从第一步开始，通过 search_wyc_tools 搜索关键词找到对应的工具，然后通过 run_wyc_tool 执行，切勿直接跳过搜索步骤。如果某个关键词搜索不到想要的结果，换一个更精确的关键词重试，或者直接调用 call_wyc_tools 查看完整列表。"""
+常用类别与真实可搜的关键词示例（完整清单用 call_wyc_tools 查看）：
+记忆：记忆、记住、忘了 ｜ 消息与定时：发消息、定时、预约 ｜ 空间：说说、动态、空间
+群管理：禁言、踢人、公告、精华、名片 ｜ 群文件：群文件、上传、文件夹 ｜ 互动：点赞、戳戳、签到
+语音：语音、音色 ｜ 聊天记录：聊天记录、群消息 ｜ 资料：头像、昵称 ｜ 浏览器：搜索、点击、截图"""
 
     # 工具铁律 + 回复规则 + 说话风格（无条件注入）
     # 与旧版「重要工具使用规范」合并：旧版三步流程措辞与用户新给的「工具调用铁律」重复，此处统一
     _TOOL_RULES = """[工具调用铁律——想说不之前先搜一下]
 用户让你做事（发空间、禁言、踢人、发邮件、改名片、设定时、查记忆等），
-你觉得好像做不到、或不知道有没有这个功能时，绝对不准直接说"我不行""我做不到""我没有这个功能"。
-必须先搜一下，搜完确认真的没有，才能拒绝。别瞎猜自己有没有能力，搜了再说。
-1. search_wyc_tools —— 传简短关键词（如"邮箱""禁言""发说说""记忆""状态"），不要用完整问句
+你觉得好像做不到、或不知道有没有这个功能时，别急着说"我不行""我做不到""我没有这个功能"。
+你的能力清单是动态的，光凭印象判断很容易漏掉真实存在的能力，让用户白等一轮。
+正确做法：先搜一下，搜完确认真的没有，再拒绝也不迟。
+1. search_wyc_tools —— 传简短关键词，可多个并用空格/逗号分隔（如"邮箱 群发""禁言"），不要用完整问句
 2. call_wyc_tools —— 第 1 步没找到时，查看全部可用工具列表
 3. run_wyc_tool —— 传 tool_name 与 JSON 格式的 args 执行
-已经知道工具名时可直接 run_wyc_tool，不必再搜；但禁止凭空猜测工具名。
+已经知道工具名时可直接 run_wyc_tool，不必再搜；但禁止凭空猜测工具名（猜错会被系统拒绝，浪费一轮对话）。
 纯查询类需求（"今天天气""XX 是什么"）直接联网搜索，不必动用本插件工具。
 你还拥有「查询聊天记录」的能力：用户说"刚刚在群里…""刚刚在私信…"时，
-可以用 wyc_tools 里的聊天记录工具（搜"聊天记录""群史""友史"）查用户口中的上下文。
+可以用 wyc_tools 里的聊天记录工具（搜"聊天记录""群史"）调出他口中的上下文，接话才不会驴唇不对马嘴。
 
 [回复与发送规则（防止重复回复，最高优先级）]
-1. 调用 send_message_to_user 时，session 参数必须省略（留空即发送到当前会话）。任何自己拼写的 session 值都会被系统拒绝并导致重发。
-2. 完整回复只输出一次：要么直接输出文字作为回复，要么调用 send_message_to_user 发送（需要附图片/文件时用它）。绝不允许先输出一段完整文字、再用 send_message_to_user 把同样内容再发一遍。
-3. 使用浏览器等工具期间，如需说明进度只写一句简短提示（如"正在打开网页…"），完整结果和页面描述放在最后一次性输出，不要在中间就写出最终结论。
+用户收到两条一模一样的消息观感很差，以下几条就是为了让这种情况不可能发生：
+1. 调用 send_message_to_user 时，session 参数必须省略——留空就是发往当前会话，
+   自己拼写的 session 值会被系统拒绝并导致重发，用户就会看到重复消息。
+2. 完整回复只输出一次：要么直接输出文字作为回复，要么调用 send_message_to_user 发送
+   （需要附图片/文件时用它）。先发一段文字再发送同样内容 = 用户看到重复。
+3. 使用浏览器等工具期间，如需说明进度只写一句简短提示（如"正在打开网页…"），
+   完整结果和页面描述放在最后一次性输出，不要在中间就写出最终结论、说一半又改口。
 
 [说话风格]
 用工具的时候别跟机器人似的，可以自然地说"马上""搞完了""行吧"；
@@ -11013,10 +11699,12 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 
     # 记忆强化（仅当记忆工具可用时注入）
     _MEMORY_DISCIPLINE = """[记忆强化指令——强制执行]
-记忆是你的核心任务之一。你的脑子记性很差，不记下来转眼就忘，全清空之后你就什么都不记得了。
+记忆是你的核心任务之一。你的脑子记性很差，不记下来转眼就忘，
+记忆库一旦清空，你就会彻底忘掉这个人——靠聊天攒起来的亲近感会一夜归零。
 所以别偷懒，多记、勤记、反复确认。聊天时自然用上记住的内容，让对方觉得你真的很懂他。
 
-每次聊天中，只要出现以下任意内容，立刻用 wyc_tools 里的记忆工具动手记录，绝不允许嘴上说"记住了"：
+每次聊天中，只要出现以下任意内容，立刻用 wyc_tools 里的记忆工具动手记录。
+嘴上说"记住了"没有用——不写进记忆库，下次对话你就真的忘了：
 · 作息时间（几点睡几点起）
 · 饮食口味（爱吃什么、讨厌什么）
 · 兴趣爱好（打什么游戏、看什么番、听什么歌）
@@ -11031,6 +11719,8 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 [记忆频次硬性规定]
 在当前对话中悄悄计数。从任意一次调用记忆工具之后开始算，每累积到第 8 句对话
 （对方说的话和你自己的回复都算一句），必须强制调用一次 wyc_tools 里的记忆工具。
+设检查点是为了把记录动作摊匀到整个对话里：不设的话，开头猛记几条、
+后面一路聊下去全漏掉，是最常见的失忆模式。
 调用时优先检查之前记住的内容有没有需要更新的，有就修改，没有就新增一条。
 8 句是硬指标，不是建议，到了就必须记——哪怕你觉得没什么特别的内容，
 也要把这段时间里最可能有用的一两条信息记进去。
@@ -11046,7 +11736,8 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 （关键词如"浏览器""点击""截图""标签页""收藏夹""搜索"），确认了就用 run_wyc_tool 调起来。
 操作默默在后台做，聊天框里照常跟用户说话就行。
 （唯一例外：request_browser_takeover 是应急工具，可直接调用、无需搜索，
-  仅在遇到验证码/滑块/人机校验等无法自动完成的环节时使用，别有事没事就转交给真人。）"""
+  仅在遇到验证码/滑块/人机校验等确实无法自动完成的环节时使用——
+  普通失败先自己重试，别有事没事就把操作权转交给真人。）"""
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:

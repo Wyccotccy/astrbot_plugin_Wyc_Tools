@@ -14,7 +14,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **110 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.9.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.10.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -31,6 +31,7 @@
 - [工具调优](#工具调优webui-可视化)
 - [浏览器自动化](#浏览器自动化)
 - [完整工具列表](#完整工具列表)
+- [记忆外部 API](#记忆外部-apiv5100)
 - [配置说明](#配置说明)
 - [管理员命令](#管理员命令)
 - [常见问题](#常见问题)
@@ -46,7 +47,7 @@
 | 💬 **消息** | 主动发消息、引用撤回、戳一戳、定时消息、高级定时指令（持久化） |
 | 👥 **群管理** | 禁言、踢人、全体禁言、改名片、群公告、群文件、管理员设置、群荣誉、加群方式、打卡等 25 项 |
 | 🎨 **个人资料** | 修改昵称/签名、设置 QQ 头像、设置群头像、点赞、自定义表情 |
-| 🧠 **记忆管理** | 自动提取用户重要信息，支持增删改查、标签分类、自动注入上下文 |
+| 🧠 **记忆管理** | 自动提取用户重要信息，支持增删改查、标签分类、自动注入上下文；**外部 API** 供自有系统集成（token 鉴权，传 QQ 号拉取全部记忆） |
 | 📧 **邮件** | 通过 QQ 邮箱 SMTP 发送邮件 |
 | 🤖 **AI 声聊** | QQ 官方免费 TTS，指定角色发送语音 |
 | 🌐 **浏览器自动化** | 坐标交互（点击/双击/右键/长按/拖拽/悬停/输入）、搜索、标签页、收藏夹、反风控伪装 |
@@ -90,6 +91,9 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 第 2 步：call_wyc_tools()                ← 搜索不到时才查看完整列表
 第 3 步：run_wyc_tool("工具名", {...})   ← 确定工具名后执行
 ```
+
+`search_wyc_tools` 支持**多关键词**（空格 / 逗号 / 顿号等分隔，如 `"群 禁言"`），
+五级计分排序（名称精确 > 词精确 > 名称包含 > 词包含 > 描述包含），命中更准。
 
 ### 推荐系统提示词
 
@@ -319,9 +323,37 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_Wyc_Tools.git
 
 ---
 
+## 记忆外部 API（v5.10.0+）
+
+独立轻量 HTTP 服务：外部程序（自有网站 / App / 数据看板等）传 QQ 号即可拉取该用户的全部记忆。
+
+```
+GET http://<主机>:6190/memories?user_id=<QQ号>[&keyword=关键词][&limit=N]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `user_id` | 必填，QQ 号 |
+| `keyword` | 可选，按内容与标签过滤 |
+| `limit` | 可选，默认返回全部（按更新时间倒序） |
+
+**鉴权**（必填，二选一）：
+
+```bash
+curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:6190/memories?user_id=123456"
+curl "http://127.0.0.1:6190/memories?user_id=123456&token=<令牌>"
+```
+
+返回 `{"success": true, "user_id": "123456", "count": N, "memories": [...]}`。
+
+> ⚠️ **安全**：功能默认关闭；未设置访问令牌时所有请求一律 403；令牌在 WebUI 中脱敏存储，
+> 修改后即时生效；改开关 / 地址 / 端口保存后服务自动重启。对外暴露请务必使用强令牌并配置防火墙。
+
+---
+
 ## 配置说明
 
-WebUI → 插件 → 更多LLM工具 → 配置页。共 **175 个配置项**，常用项：
+WebUI → 插件 → 更多LLM工具 → 配置页。共 **179 个配置项**，常用项：
 
 ### 基础
 
@@ -340,6 +372,9 @@ WebUI → 插件 → 更多LLM工具 → 配置页。共 **175 个配置项**，
 | `max_memories_per_user` | 每用户最大记忆数（超出删最旧） |
 | `memory_inject_enabled` | 自动注入用户记忆到上下文 |
 | `max_inject_memories` | 单次注入的最大记忆条数 |
+| `memory_api_enabled` | 记忆外部 API 总开关（默认关） |
+| `memory_api_host` / `memory_api_port` | API 监听地址与端口（默认 `0.0.0.0:6190`） |
+| `memory_api_token` | API 访问令牌（必填，WebUI 脱敏，修改即时生效） |
 | `inject_group_role_enabled` | 自动注入发言者在群内的身份 |
 | `inject_tool_prompt_enabled` | 注入工具使用说明（约 800–1000 token，默认关） |
 
@@ -520,6 +555,14 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.10.0 — 记忆外部 API + 搜索大幅增强
+
+- 🧠 **记忆外部 API**：独立 HTTP 服务，外部程序传 QQ 号即可拉取全部记忆
+  （token 鉴权、默认关闭、热更新，详见[上文](#记忆外部-apiv5100)）
+- 🔎 **多关键词搜索**：`search_wyc_tools("群 禁言")` 空格/逗号分隔多词，五级计分排序
+- 📚 **2200 条口语化关键词**：110 个工具各 +20 条，内置关键词总量 1472 → 3672
+- ✍️ **注入提示词重写**：删掉过时静态工具目录，示例词全部真实可搜，`_TOOL_PROMPT` 1576 → 641 字符
 
 ### v5.9.0 — 自定义 Python 函数工具
 

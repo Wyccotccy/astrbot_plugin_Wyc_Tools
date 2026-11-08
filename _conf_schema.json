@@ -309,6 +309,30 @@
     "default": true,
     "hint": "开启后，每次对话会自动注入该用户最新的记忆到当前用户消息中（临时内容，不写入会话历史）"
   },
+  "memory_api_enabled": {
+    "description": "启用记忆外部 API（独立 HTTP 服务）",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后启动独立 HTTP 服务，外部程序传 QQ 号即可拉取该用户的全部记忆；需先设置访问令牌，否则所有请求都会被拒绝"
+  },
+  "memory_api_host": {
+    "description": "记忆外部 API 监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "0.0.0.0 表示允许局域网/外网访问（请确保防火墙已放行端口且已设置令牌）；仅本机调用可改为 127.0.0.1"
+  },
+  "memory_api_port": {
+    "description": "记忆外部 API 端口",
+    "type": "int",
+    "default": 6190,
+    "hint": "与其他服务（如 WebUI 6185）不要冲突；修改后保存即生效"
+  },
+  "memory_api_token": {
+    "description": "记忆外部 API 访问令牌",
+    "type": "string",
+    "default": "",
+    "hint": "必填才能访问。请求时通过 Authorization: Bearer <令牌> 或 ?token=<令牌> 传入；修改保存后立即生效，无需重启"
+  },
   "inject_group_role_enabled": {
     "description": "是否在群聊中自动注入用户身份（成员/管理员/群主）",
     "type": "bool",
