@@ -337,6 +337,14 @@ GET http://<主机>:6190/memories?user_id=<QQ号>[&keyword=关键词][&limit=N]
 | `keyword` | 可选，按内容与标签过滤 |
 | `limit` | 可选，默认返回全部（按更新时间倒序） |
 
+**删除单条记忆**（v5.10.1+）：
+
+```bash
+curl -X DELETE "http://127.0.0.1:6190/memories/<记忆ID>?token=<令牌>"
+```
+
+记忆 ID 先从查询结果里取（每条的 `id` 字段）。不支持编辑与创建。
+
 **鉴权**（必填，二选一）：
 
 ```bash
@@ -555,6 +563,10 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.10.1 — 记忆外部 API 支持删除
+
+- 🗑️ **删除单条记忆**：`DELETE /memories/{记忆ID}`（同一令牌鉴权，404/403 语义完整，24 项测试全过）
 
 ### v5.10.0 — 记忆外部 API + 搜索大幅增强
 

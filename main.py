@@ -726,6 +726,7 @@ class MemoryApiServer:
       的 Open API 是固定端点集（chat/im/config），插件无法注册新端点 ——
       所以只能自建 HTTP 服务。
     - 端点：GET /memories?user_id=<QQ号>[&keyword=xx][&limit=N]
+            DELETE /memories/{记忆ID}（删除单条，需要令牌）
     - 安全：必须配置 memory_api_token 才放行（Bearer 头或 ?token= 均可，
       恒时比较防时序侧信道）；token 未配置时所有请求一律 403。
     - 配置引用插件主 config 字典，token 改动即时生效；host/port/enabled
@@ -813,12 +814,45 @@ class MemoryApiServer:
             self.port = 6190
         app = web.Application()
         app.router.add_get("/memories", self._handle_memories)
+        app.router.add_delete("/memories/{memory_id}", self._handle_delete_memory)
         app.router.add_get("/", self._handle_index)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         self._runner = runner
+
+    async def _handle_delete_memory(self, request: "web.Request"):
+        """DELETE /memories/{记忆ID}：删除单条记忆（需要令牌，破坏性操作）。
+
+        记忆 ID 可先通过 GET /memories?user_id=<QQ号> 查到。
+        不提供编辑与创建 —— 外部 API 保持只读 + 可删的最小面。
+        """
+        if not self._check_token(request):
+            return web.json_response(
+                {"success": False, "error": "访问令牌无效"},
+                status=403,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        memory_id = str(request.match_info.get("memory_id", "") or "").strip()
+        if not memory_id:
+            return web.json_response(
+                {"success": False, "error": "缺少记忆 ID"},
+                status=400,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        ok = await self.memory_manager.delete_memory(memory_id)
+        if not ok:
+            return web.json_response(
+                {"success": False, "error": "记忆不存在或已删除"},
+                status=404,
+                dumps=lambda d: json.dumps(d, ensure_ascii=False),
+            )
+        logger.info(f"[MemoryAPI] 已删除记忆 {memory_id}")
+        return web.json_response(
+            {"success": True, "deleted_id": memory_id},
+            dumps=lambda d: json.dumps(d, ensure_ascii=False),
+        )
 
     async def _handle_index(self, request: "web.Request"):
         """根路径：返回简短的用法说明，方便外部调用者自省（同样需要令牌）。"""
@@ -831,7 +865,8 @@ class MemoryApiServer:
         return web.json_response(
             {
                 "success": True,
-                "usage": "GET /memories?user_id=<QQ号>[&keyword=关键词][&limit=N]",
+                "usage": "GET /memories?user_id=<QQ号>[&keyword=关键词][&limit=N]"
+                         " | DELETE /memories/{记忆ID}",
                 "auth": "请求头 Authorization: Bearer <token> 或 URL 参数 ?token=<token>",
             },
             dumps=lambda d: json.dumps(d, ensure_ascii=False),
